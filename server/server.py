@@ -21,6 +21,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import FileResponse
 
 ROOT = Path(os.environ.get("PHOTODROP_ROOT", Path.home() / "PhotoDrop"))
 HOLDING = ROOT / "holding"
@@ -210,6 +211,18 @@ async def still_there(request: Request) -> list[str]:
         except OSError:
             pass
     return present
+
+
+@app.get("/media")
+def media(request: Request, key: str) -> FileResponse:
+    """A transferred file, for viewing from History. The path comes from the database, never the request."""
+    check_user(request)
+    with db() as conn:
+        row = conn.execute("SELECT name, holding_path, dest_path FROM files WHERE key=?", (key,)).fetchone()
+    path = row and (row["holding_path"] or row["dest_path"])
+    if not path or not os.path.isfile(path):
+        raise HTTPException(404, "not available right now")
+    return FileResponse(path, filename=row["name"], content_disposition_type="inline")
 
 
 @app.get("/history")

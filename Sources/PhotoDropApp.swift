@@ -1,4 +1,5 @@
 import BackgroundTasks
+import AVKit
 import Photos
 import SwiftUI
 
@@ -325,6 +326,9 @@ private struct HistoryTab: View {
                 Section("Latest transfers") {
                     if uploader.history.isEmpty { Text("Nothing transferred yet.").foregroundStyle(.secondary) }
                     ForEach(uploader.history) { row in
+                        NavigationLink {
+                            TransferredMediaView(row: row, url: uploader.mediaURL(key: row.key))
+                        } label: {
                         VStack(alignment: .leading, spacing: 2) {
                             HStack {
                                 Text(row.name)
@@ -338,6 +342,7 @@ private struct HistoryTab: View {
                             if let path = row.dest_path { Text(path).font(.caption2).foregroundStyle(.secondary) }
                             if let error = row.error { Text(error).font(.caption2).foregroundStyle(.red) }
                         }
+                        }
                     }
                 }
             }
@@ -345,6 +350,36 @@ private struct HistoryTab: View {
             .task { await uploader.loadHistory() }
             .refreshable { await uploader.loadHistory() }
         }
+    }
+}
+
+/// Loads from the laptop or desktop, not the phone, so it still works after the phone's copy is deleted.
+private struct TransferredMediaView: View {
+    let row: HistoryRow
+    let url: URL?
+
+    private var isVideo: Bool {
+        ["mov", "mp4", "m4v"].contains((row.name as NSString).pathExtension.lowercased())
+    }
+
+    var body: some View {
+        Group {
+            if let url, isVideo {
+                VideoPlayer(player: AVPlayer(url: url))
+            } else if let url {
+                AsyncImage(url: url) { phase in
+                    switch phase {
+                    case .success(let image): image.resizable().scaledToFit()
+                    case .failure: Text("Not available. If it's on the desktop, the laptop must be able to reach it.").padding()
+                    default: ProgressView()
+                    }
+                }
+            } else {
+                Text("Add the laptop address in Settings.")
+            }
+        }
+        .navigationTitle(row.name)
+        .navigationBarTitleDisplayMode(.inline)
     }
 }
 

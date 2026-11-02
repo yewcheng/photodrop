@@ -118,6 +118,20 @@ with tempfile.TemporaryDirectory() as tmp:
         assert any(r["name"] == "IMG_3.HEIC" and r["state"] == "verified" and "202604_a" in r["dest_path"] for r in rows)
         assert call("GET", "/history", user=None)[0] == 403
 
+        # History can open a file wherever it now is, for the right user only.
+        media_url = BASE + "/media?" + urllib.parse.urlencode({"key": f"img_3.heic|{len(third)}"})
+        req = urllib.request.Request(media_url, headers={"Tailscale-User-Login": USER})
+        with urllib.request.urlopen(req) as r:
+            assert r.read() == third
+        for headers, code in (({}, 403), ({"Tailscale-User-Login": USER, "X": "1"}, None)):
+            if code:
+                try:
+                    urllib.request.urlopen(urllib.request.Request(media_url, headers=headers))
+                    raise AssertionError("expected refusal")
+                except urllib.error.HTTPError as e:
+                    assert e.code == code
+        assert call("GET", "/media?key=missing")[0] == 404
+
         # Delete confirmation: only verified files still on the desktop, and only for the right user.
         third_key = f"img_3.heic|{len(third)}"
         ask = lambda keys, user=USER: call("POST", "/still-there", json.dumps(keys).encode(), user=user)

@@ -384,6 +384,14 @@ final class Uploader: ObservableObject {
         }
     }
 
+    func mediaURL(key: String) -> URL? {
+        guard let base = baseURL else { return nil }
+        var components = URLComponents(url: base.appendingPathComponent("media"), resolvingAgainstBaseURL: false)
+        components?.queryItems = [URLQueryItem(name: "key", value: key)]
+        components?.percentEncodedQuery = components?.percentEncodedQuery?.replacingOccurrences(of: "+", with: "%2B")
+        return components?.url
+    }
+
     func loadHistory() async {
         guard let base = baseURL else { return }
         if let (data, response) = try? await session.data(from: base.appendingPathComponent("history")),
