@@ -113,6 +113,26 @@ with tempfile.TemporaryDirectory() as tmp:
         blocker.unlink()
         wait_for(lambda: not held(root), "moved after the problem cleared")
 
+        # History records where each file ended up.
+        rows = call("GET", "/history")[1]
+        assert any(r["name"] == "IMG_3.HEIC" and r["state"] == "verified" and "202604_a" in r["dest_path"] for r in rows)
+        assert call("GET", "/history", user=None)[0] == 403
+
+        # Changing the folder re-checks it and sends new files there.
+        new_dest = Path(tmp) / "elsewhere"
+        new_dest.mkdir()
+        (new_dest / "IMG_OLD.HEIC").write_bytes(b"12345")
+        q = urllib.parse.urlencode({"path": str(new_dest)})
+        assert call("POST", f"/destination?{q}", user=None)[0] == 403
+        assert call("POST", f"/destination?{q}")[0] == 200
+        assert (root / "destination.txt").read_text() == str(new_dest)
+        wait_for(lambda: call("GET", "/manifest")[1]["archive_indexed"], "new folder indexed")
+        assert call("GET", "/manifest")[1]["archive"] == ["img_old.heic|5"]
+        assert put("IMG_OLD.HEIC", b"12345")[1]["state"] == "archive"
+        assert put("IMG_NEW.HEIC", b"new")[1]["state"] == "holding"
+        wait_for(lambda: (new_dest / "2026/202603_a/IMG_NEW.HEIC").exists(), "moved to new folder")
+        assert call("POST", "/destination?path=relative/folder")[0] == 400
+
         # Bad destination names never reach the disk.
         for bad in ("../evil.txt", "a/b.txt", "a\\b.txt", "C:evil.txt", "x.part", ".hidden", "con.txt", "trail."):
             assert put(bad, b"x")[0] == 400, bad

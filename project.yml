@@ -29,6 +29,10 @@ targets:
         CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
         UILaunchScreen: {}
         NSPhotoLibraryUsageDescription: PhotoDrop copies your original photos and videos to your laptop.
+        UIBackgroundModes:
+          - processing
+        BGTaskSchedulerPermittedIdentifiers:
+          - com.photodrop.backup.process
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
     settings:

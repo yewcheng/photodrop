@@ -1,8 +1,15 @@
+import BackgroundTasks
 import Photos
 import SwiftUI
 
 @main
 struct PhotoDropApp: App {
+    init() {
+        BGTaskScheduler.shared.register(forTaskWithIdentifier: Uploader.backgroundTaskId, using: nil) { task in
+            Task { @MainActor in await Uploader.shared.handleBackground(task as! BGProcessingTask) }
+        }
+    }
+
     var body: some Scene {
         WindowGroup { ContentView() }
     }
@@ -23,8 +30,8 @@ private func monthTitle(_ month: String) -> String {
 }
 
 struct ContentView: View {
-    @AppStorage("serverURL") private var serverURL = ""
-    @StateObject private var uploader = Uploader()
+    @Environment(\.scenePhase) private var scenePhase
+    @ObservedObject private var uploader = Uploader.shared
 
     var body: some View {
         TabView {
@@ -32,6 +39,8 @@ struct ContentView: View {
                 .tabItem { Label("Backup", systemImage: "arrow.up.circle") }
             LibraryTab(uploader: uploader)
                 .tabItem { Label("Library", systemImage: "photo.on.rectangle") }
+            HistoryTab(uploader: uploader)
+                .tabItem { Label("History", systemImage: "clock") }
             SettingsTab(uploader: uploader)
                 .tabItem { Label("Settings", systemImage: "gearshape") }
         }
@@ -40,16 +49,21 @@ struct ContentView: View {
             await uploader.loadLibrary()
             // Keeps "waiting on laptop" moving to "on desktop" while the app is open.
             while !Task.isCancelled {
-                await uploader.refresh(server: serverURL)
+                await uploader.refresh()
+                uploader.autoTick()
                 try? await Task.sleep(nanoseconds: 20_000_000_000)
             }
+        }
+        .onChange(of: scenePhase) { phase in
+            if phase == .background { Uploader.scheduleBackground() }
+            if phase == .active { Task { await uploader.loadLibrary() } }
         }
     }
 }
 
 private struct BackupTab: View {
     @AppStorage("serverURL") private var serverURL = ""
-    @AppStorage("batchLimit") private var batchLimit = 500
+    @AppStorage("autoBackup") private var autoBackup = false
     @ObservedObject var uploader: Uploader
 
     var body: some View {
@@ -63,6 +77,13 @@ private struct BackupTab: View {
                 }
                 connection
                 send
+                if autoBackup {
+                    Section("Automatic backup") {
+                        let blockers = uploader.autoBlockers
+                        Text(blockers.isEmpty ? "Ready: sends while the app is open, and when iOS allows it in the background." : "Waiting for: \(blockers.joined(separator: ", "))")
+                            .font(.footnote)
+                    }
+                }
             }
             .navigationTitle("Backup")
         }
@@ -92,22 +113,35 @@ private struct BackupTab: View {
         }
     }
 
+    /// Measured from this batch's own speed, so it includes time spent fetching from iCloud.
+    private var timeLeft: String {
+        let elapsed = Date().timeIntervalSince(uploader.batchStarted)
+        guard elapsed > 5, uploader.bytesDone > 0 else { return "Working it out…" }
+        let seconds = Double(max(uploader.bytesTotal - uploader.bytesDone, 0)) / (Double(uploader.bytesDone) / elapsed)
+        let formatter = DateComponentsFormatter()
+        formatter.allowedUnits = seconds >= 3600 ? [.hour, .minute] : [.minute, .second]
+        formatter.unitsStyle = .abbreviated
+        return "About " + (formatter.string(from: seconds) ?? "")
+    }
+
     private var send: some View {
         Section("Send") {
             if uploader.running {
-                ProgressView(value: Double(uploader.batchDone), total: Double(max(uploader.batchTotal, 1)))
+                ProgressView(value: min(Double(uploader.bytesDone), Double(max(uploader.bytesTotal, 1))), total: Double(max(uploader.bytesTotal, 1)))
                 LabeledContent("Files", value: "\(uploader.batchDone) of \(uploader.batchTotal)")
-                LabeledContent("Data sent", value: fileSize(uploader.bytes))
+                LabeledContent("Data", value: "\(fileSize(uploader.bytesDone)) of \(fileSize(uploader.bytesTotal))")
+                LabeledContent("Time left", value: timeLeft)
                 Button("Stop", role: .destructive) { uploader.stop() }
             } else {
                 Button("Send everything not sent yet") {
                     let ids = uploader.media.filter { uploader.state(of: $0) == .pending }.map(\.id)
-                    uploader.start(server: serverURL, ids: Set(ids), limit: batchLimit)
+                    uploader.resumeAuto()
+                    uploader.start(ids: Set(ids))
                 }
                 .disabled(uploader.manifest == nil || uploader.scanning)
                 if !uploader.failed.isEmpty {
                     Button("Retry \(uploader.failed.count) failed") {
-                        uploader.start(server: serverURL, ids: Set(uploader.failed.keys), limit: batchLimit)
+                        uploader.start(ids: Set(uploader.failed.keys))
                     }
                 }
             }
@@ -120,8 +154,6 @@ private struct BackupTab: View {
 }
 
 private struct LibraryTab: View {
-    @AppStorage("serverURL") private var serverURL = ""
-    @AppStorage("batchLimit") private var batchLimit = 500
     @ObservedObject var uploader: Uploader
 
     var body: some View {
@@ -135,7 +167,7 @@ private struct LibraryTab: View {
             }
             .navigationTitle("Library")
             .overlay {
-                if uploader.scanning { ProgressView("Reading your photo library…") }
+                if uploader.scanning && uploader.media.isEmpty { ProgressView("Reading your photo library…") }
             }
             // Outside the month pushes too, so the selection can be sent from any month.
             .safeAreaInset(edge: .bottom) {
@@ -144,7 +176,7 @@ private struct LibraryTab: View {
                         Button("Clear") { uploader.selected.removeAll() }
                         Spacer()
                         Button("Send \(uploader.selected.count) selected") {
-                            uploader.start(server: serverURL, ids: uploader.selected, limit: batchLimit)
+                            uploader.start(ids: uploader.selected)
                         }
                         .buttonStyle(.borderedProminent)
                         .disabled(uploader.manifest == nil || uploader.running)
@@ -157,10 +189,58 @@ private struct LibraryTab: View {
     }
 }
 
+private struct HistoryTab: View {
+    @ObservedObject var uploader: Uploader
+
+    var body: some View {
+        NavigationStack {
+            List {
+                if !uploader.failed.isEmpty {
+                    Section("Failed") {
+                        ForEach(uploader.media.filter { uploader.failed[$0.id] != nil }) { item in
+                            VStack(alignment: .leading) {
+                                Text(item.filename)
+                                Text(uploader.failed[item.id] ?? "").font(.caption).foregroundStyle(.red)
+                            }
+                        }
+                        Button("Retry all") { uploader.start(ids: Set(uploader.failed.keys)) }
+                            .disabled(uploader.running)
+                    }
+                }
+                Section("Latest transfers") {
+                    if uploader.history.isEmpty { Text("Nothing transferred yet.").foregroundStyle(.secondary) }
+                    ForEach(uploader.history) { row in
+                        VStack(alignment: .leading, spacing: 2) {
+                            HStack {
+                                Text(row.name)
+                                Spacer()
+                                Text(row.state == "verified" ? "Verified" : "On laptop")
+                                    .font(.caption)
+                                    .foregroundStyle(row.state == "verified" ? .green : .orange)
+                            }
+                            Text("\(fileSize(row.size)) · \(Date(timeIntervalSince1970: row.verified_at ?? row.received_at).formatted())")
+                                .font(.caption).foregroundStyle(.secondary)
+                            if let path = row.dest_path { Text(path).font(.caption2).foregroundStyle(.secondary) }
+                            if let error = row.error { Text(error).font(.caption2).foregroundStyle(.red) }
+                        }
+                    }
+                }
+            }
+            .navigationTitle("History")
+            .task { await uploader.loadHistory() }
+            .refreshable { await uploader.loadHistory() }
+        }
+    }
+}
+
 private struct SettingsTab: View {
     @AppStorage("serverURL") private var serverURL = ""
     @AppStorage("batchLimit") private var batchLimit = 500
+    @AppStorage("wifiOnly") private var wifiOnly = true
+    @AppStorage("autoBackup") private var autoBackup = false
     @ObservedObject var uploader: Uploader
+    @State private var destination = ""
+    @State private var destinationMessage: String?
 
     var body: some View {
         NavigationStack {
@@ -170,11 +250,27 @@ private struct SettingsTab: View {
                         .keyboardType(.URL)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
-                        .onSubmit { Task { await uploader.refresh(server: serverURL) } }
+                        .onSubmit { Task { await uploader.refresh() } }
                 } header: {
                     Text("Laptop address")
                 } footer: {
                     Text(uploader.manifest == nil ? "Not connected" : "Connected")
+                }
+                Section {
+                    TextField("D:\\Photos", text: $destination)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                    Button("Save folder") {
+                        Task {
+                            let error = await uploader.setDestination(destination)
+                            destinationMessage = error ?? "Saved. The laptop will re-check what's in this folder."
+                        }
+                    }
+                    .disabled(uploader.manifest == nil || destination.isEmpty || destination == uploader.manifest?.destination)
+                } header: {
+                    Text("Desktop folder")
+                } footer: {
+                    Text(destinationMessage ?? "Year and month folders are created inside this one, reusing any that exist.")
                 }
                 Section("Sending") {
                     Picker("Most files per batch", selection: $batchLimit) {
@@ -183,9 +279,24 @@ private struct SettingsTab: View {
                         Text("1,000").tag(1000)
                         Text("No limit").tag(Int.max)
                     }
+                    Toggle("Only send on Wi-Fi", isOn: $wifiOnly)
+                }
+                Section {
+                    Toggle("Automatic backup", isOn: $autoBackup)
+                        .onChange(of: autoBackup) { on in
+                            if on {
+                                uploader.resumeAuto()
+                                Uploader.scheduleBackground()
+                            }
+                        }
+                } footer: {
+                    Text("Sends when the phone is charging, on Wi-Fi, and the desktop is reachable. It starts within seconds while the app is open. In the background, iOS decides when it runs, which may be overnight or not at all.")
                 }
             }
             .navigationTitle("Settings")
+            .onReceive(uploader.$manifest) { manifest in
+                if destination.isEmpty, let saved = manifest?.destination { destination = saved }
+            }
         }
     }
 }
@@ -235,17 +346,17 @@ private struct MonthView: View {
             .padding(.horizontal)
             LazyVGrid(columns: [GridItem(.adaptive(minimum: 100), spacing: 2)], spacing: 2) {
                 ForEach(shown) { item in
-                    Thumbnail(asset: item.asset, side: 300)
+                    Thumbnail(id: item.id, side: 300)
                         .overlay(alignment: .topTrailing) { badge(for: item) }
                         .accessibilityLabel(item.filename)
                         .accessibilityAddTraits(uploader.selected.contains(item.id) ? [.isButton, .isSelected] : .isButton)
                         .onTapGesture { toggle(item) }
                         .contextMenu {
                             Text(item.filename)
-                            Text(item.asset.creationDate?.formatted() ?? "")
+                            Text(item.created?.formatted() ?? "")
                             Text(fileSize(item.size))
                         } preview: {
-                            Thumbnail(asset: item.asset, side: 1200).frame(width: 320, height: 320)
+                            Thumbnail(id: item.id, side: 1200).frame(width: 320, height: 320)
                         }
                 }
             }
@@ -288,7 +399,7 @@ private struct MonthView: View {
 }
 
 private struct Thumbnail: View {
-    let asset: PHAsset
+    let id: String
     let side: CGFloat
     @State private var image: UIImage?
 
@@ -302,7 +413,8 @@ private struct Thumbnail: View {
             }
             .clipped()
             .contentShape(Rectangle())
-            .task(id: asset.localIdentifier) {
+            .task(id: id) {
+                guard let asset = PHAsset.fetchAssets(withLocalIdentifiers: [id], options: nil).firstObject else { return }
                 let options = PHImageRequestOptions()
                 options.deliveryMode = .opportunistic
                 options.isNetworkAccessAllowed = true

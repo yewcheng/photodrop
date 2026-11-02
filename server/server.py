@@ -30,6 +30,7 @@ DEST = Path((ROOT / "destination.txt").read_text().strip())
 MIN_FREE_BYTES = 10 * 1024**3
 MOVE_INTERVAL = float(os.environ.get("PHOTODROP_MOVE_INTERVAL", 20))
 INDEX_INTERVAL = 3600
+reindex_requested = threading.Event()
 
 MONTH_RE = re.compile(r"^\d{4}(0[1-9]|1[0-2])$")
 # Filenames become paths on Windows, so only what Windows treats as one plain file gets through.
@@ -127,7 +128,8 @@ def index_archive() -> None:
 def mover_pass(last_index: float) -> float:
     if not DEST.is_dir():
         return last_index
-    if time.time() - last_index > INDEX_INTERVAL:
+    if reindex_requested.is_set() or time.time() - last_index > INDEX_INTERVAL:
+        reindex_requested.clear()
         index_archive()
         last_index = time.time()
     with db() as conn:
@@ -183,10 +185,40 @@ def manifest(request: Request) -> dict:
         "archive": archive,
         "archive_indexed": indexed is not None,
         "desktop_online": DEST.is_dir(),
+        "destination": str(DEST),
         "holding_bytes": sum(f["size"] for f in waiting),
         "move_error": next((f["error"] for f in waiting if f["error"]), None),
         "laptop_free_bytes": shutil.disk_usage(ROOT).free,
     }
+
+
+@app.get("/history")
+def history(request: Request, limit: int = 300) -> list[dict]:
+    check_user(request)
+    with db() as conn:
+        rows = conn.execute(
+            "SELECT key, name, size, state, dest_path, received_at, verified_at, error FROM files "
+            "ORDER BY COALESCE(verified_at, received_at) DESC LIMIT ?",
+            (min(limit, 1000),),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+@app.post("/destination")
+def set_destination(request: Request, path: str) -> dict:
+    global DEST
+    check_user(request)
+    new = Path(path.strip())
+    if not new.is_absolute() or ".." in new.parts:
+        raise HTTPException(400, "needs a full path")
+    (ROOT / "destination.txt").write_text(str(new))
+    DEST = new
+    # The old archive list says nothing about the new folder.
+    with db() as conn:
+        conn.execute("DELETE FROM archive")
+        conn.execute("DELETE FROM meta WHERE k='indexed_at'")
+    reindex_requested.set()
+    return {"destination": str(new), "reachable": new.is_dir()}
 
 
 @app.put("/file")
