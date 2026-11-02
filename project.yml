@@ -1,0 +1,38 @@
+name: PhotoDrop
+options:
+  bundleIdPrefix: com.photodrop
+  # Xcode 15 on the CI runner cannot read XcodeGen's newest pbxproj format.
+  objectVersion: 54
+  deploymentTarget:
+    iOS: "16.0"
+
+settings:
+  base:
+    SWIFT_VERSION: "5.9"
+    TARGETED_DEVICE_FAMILY: "1"
+    DEVELOPMENT_TEAM: ""                  # left empty: CI builds unsigned
+    CODE_SIGN_STYLE: Manual
+    CODE_SIGN_IDENTITY: ""
+
+targets:
+  PhotoDrop:
+    type: application
+    platform: iOS
+    sources:
+      - path: Sources
+    info:
+      path: Support/Info.plist
+      properties:
+        CFBundleDisplayName: PhotoDrop
+        # Substituted at build time so CI can stamp the release version.
+        CFBundleShortVersionString: "$(MARKETING_VERSION)"
+        CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
+        UILaunchScreen: {}
+        NSPhotoLibraryUsageDescription: PhotoDrop copies your original photos and videos to your laptop.
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.photodrop.backup
+        MARKETING_VERSION: "0.1.0"
+        CURRENT_PROJECT_VERSION: "1"

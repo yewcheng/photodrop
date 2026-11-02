@@ -1,0 +1,74 @@
+name: Build PhotoDrop
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-14
+    timeout-minutes: 30
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Test the receiver
+        run: |
+          python3 -m venv .venv
+          .venv/bin/pip install -q fastapi uvicorn
+          .venv/bin/python server/test_server.py
+
+      - name: Generate Xcode project
+        run: |
+          brew install xcodegen
+          xcodegen generate
+
+      - name: Build and launch on simulator
+        run: |
+          set -euo pipefail
+          xcodebuild -project PhotoDrop.xcodeproj -scheme PhotoDrop -configuration Debug \
+            -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' \
+            -derivedDataPath build-sim CODE_SIGNING_ALLOWED=NO build
+          UDID=$(xcrun simctl create ci-phone \
+            "com.apple.CoreSimulator.SimDeviceType.iPhone-15" \
+            "$(xcrun simctl list runtimes -j | python3 -c 'import json,sys; print([r["identifier"] for r in json.load(sys.stdin)["runtimes"] if r["platform"]=="iOS" and r["isAvailable"]][-1])')")
+          xcrun simctl boot "$UDID"
+          xcrun simctl bootstatus "$UDID" -b
+          xcrun simctl install "$UDID" build-sim/Build/Products/Debug-iphonesimulator/PhotoDrop.app
+          xcrun simctl launch "$UDID" com.photodrop.backup
+          sleep 8
+          xcrun simctl spawn "$UDID" launchctl list | grep -q com.photodrop.backup \
+            || { echo "::error::app is not running after launch"; exit 1; }
+
+      - name: Build unsigned .ipa
+        run: |
+          set -euo pipefail
+          xcodebuild -project PhotoDrop.xcodeproj -scheme PhotoDrop -configuration Release \
+            -sdk iphoneos -derivedDataPath build-device \
+            MARKETING_VERSION=0.1.${{ github.run_number }} \
+            CURRENT_PROJECT_VERSION=${{ github.run_number }} \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" build
+          mkdir -p out/Payload
+          cp -R build-device/Build/Products/Release-iphoneos/PhotoDrop.app out/Payload/
+          cd out && zip -qry PhotoDrop-unsigned.ipa Payload
+
+      - name: Publish release and SideStore source
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          VERSION="0.1.${{ github.run_number }}"
+          gh release create "v$VERSION" out/PhotoDrop-unsigned.ipa \
+            --title "PhotoDrop $VERSION" --notes "Unsigned: SideStore signs it on install."
+          SIZE=$(stat -f%z out/PhotoDrop-unsigned.ipa)
+          URL="https://github.com/${{ github.repository }}/releases/download/v$VERSION/PhotoDrop-unsigned.ipa"
+          python3 scripts/make_source.py "$VERSION" "$SIZE" "$(date -u +%Y-%m-%d)" "$URL" > source.json
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add source.json
+          git diff --cached --quiet && exit 0
+          git commit -m "Publish $VERSION to the SideStore source [skip ci]"
+          git push
