@@ -24,59 +24,59 @@ private func monthTitle(_ month: String) -> String {
 
 struct ContentView: View {
     @AppStorage("serverURL") private var serverURL = ""
-    @AppStorage("batchLimit") private var batchLimit = 500
     @StateObject private var uploader = Uploader()
 
-    private var months: [(month: String, items: [Media])] {
-        Dictionary(grouping: uploader.media, by: \.month)
-            .map { (month: $0.key, items: $0.value) }
-            .sorted { $0.month > $1.month }
+    var body: some View {
+        TabView {
+            BackupTab(uploader: uploader)
+                .tabItem { Label("Backup", systemImage: "arrow.up.circle") }
+            LibraryTab(uploader: uploader)
+                .tabItem { Label("Library", systemImage: "photo.on.rectangle") }
+            SettingsTab(uploader: uploader)
+                .tabItem { Label("Settings", systemImage: "gearshape") }
+        }
+        // On the TabView, which never leaves the screen: inside a tab this restarts on every back-navigation.
+        .task {
+            await uploader.loadLibrary()
+            // Keeps "waiting on laptop" moving to "on desktop" while the app is open.
+            while !Task.isCancelled {
+                await uploader.refresh(server: serverURL)
+                try? await Task.sleep(nanoseconds: 20_000_000_000)
+            }
+        }
     }
+}
+
+private struct BackupTab: View {
+    @AppStorage("serverURL") private var serverURL = ""
+    @AppStorage("batchLimit") private var batchLimit = 500
+    @ObservedObject var uploader: Uploader
 
     var body: some View {
         NavigationStack {
             Form {
-                overview
-                sending
-                Section("Months") {
-                    ForEach(months, id: \.month) { group in
-                        NavigationLink {
-                            MonthView(uploader: uploader, month: group.month, items: group.items)
-                        } label: {
-                            MonthRow(uploader: uploader, month: group.month, items: group.items)
-                        }
-                    }
+                Section("Your library") {
+                    LabeledContent("On this phone", value: "\(uploader.media.count)")
+                    LabeledContent("On desktop", value: "\(uploader.counts[.desktop] ?? 0)")
+                    LabeledContent("Waiting on laptop", value: "\(uploader.counts[.laptop] ?? 0)")
+                    LabeledContent("Not sent yet", value: "\(uploader.counts[.pending] ?? 0)")
                 }
-                Section("Laptop address") {
-                    TextField("https://laptop.tailnet.ts.net:5443", text: $serverURL)
-                        .keyboardType(.URL)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-                        .onSubmit { Task { await uploader.refresh(server: serverURL) } }
-                }
+                connection
+                send
             }
-            .navigationTitle("PhotoDrop")
-            .task {
-                await uploader.loadLibrary()
-                // Keeps "waiting on laptop" moving to "on desktop" while the screen is open.
-                while !Task.isCancelled {
-                    await uploader.refresh(server: serverURL)
-                    try? await Task.sleep(nanoseconds: 20_000_000_000)
-                }
-            }
+            .navigationTitle("Backup")
         }
     }
 
-    private var overview: some View {
-        let counts = Dictionary(grouping: uploader.media) { uploader.state(of: $0) }.mapValues(\.count)
-        return Section("Overview") {
-            LabeledContent("On this phone", value: "\(uploader.media.count)")
-            LabeledContent("On desktop", value: "\(counts[.desktop] ?? 0)")
-            LabeledContent("Waiting on laptop", value: "\(counts[.laptop] ?? 0)")
-            LabeledContent("Not sent yet", value: "\(counts[.pending] ?? 0)")
+    @ViewBuilder private var connection: some View {
+        Section("Connection") {
             if let manifest = uploader.manifest {
-                LabeledContent("Laptop", value: "Connected, \(fileSize(manifest.laptop_free_bytes)) free")
-                LabeledContent("Desktop", value: manifest.desktop_online ? "Reachable" : "Offline, files wait on laptop")
+                LabeledContent("Laptop", value: "\(fileSize(manifest.laptop_free_bytes)) free")
+                LabeledContent("Desktop", value: manifest.desktop_online ? "Reachable" : "Offline")
+                if !manifest.desktop_online {
+                    Text("Files wait on the laptop until the desktop is back.")
+                        .font(.footnote).foregroundStyle(.secondary)
+                }
                 if !manifest.archive_indexed {
                     Text("The desktop hasn't been checked yet, so files already there may be sent again. The laptop won't duplicate them on the desktop.")
                         .font(.footnote).foregroundStyle(.orange)
@@ -84,30 +84,22 @@ struct ContentView: View {
                 if let error = manifest.move_error {
                     Text("Moving to the desktop: \(error)").font(.footnote).foregroundStyle(.orange)
                 }
+            } else if serverURL.isEmpty {
+                Text("Add the laptop address in Settings.")
             } else {
                 LabeledContent("Laptop", value: "Not connected")
             }
         }
     }
 
-    private var sending: some View {
+    private var send: some View {
         Section("Send") {
-            Picker("Most files per batch", selection: $batchLimit) {
-                Text("100").tag(100)
-                Text("500").tag(500)
-                Text("1,000").tag(1000)
-                Text("No limit").tag(Int.max)
-            }
             if uploader.running {
-                Button("Stop", role: .destructive) { uploader.stop() }
                 ProgressView(value: Double(uploader.batchDone), total: Double(max(uploader.batchTotal, 1)))
                 LabeledContent("Files", value: "\(uploader.batchDone) of \(uploader.batchTotal)")
                 LabeledContent("Data sent", value: fileSize(uploader.bytes))
+                Button("Stop", role: .destructive) { uploader.stop() }
             } else {
-                Button("Send \(uploader.selected.count) selected") {
-                    uploader.start(server: serverURL, ids: uploader.selected, limit: batchLimit)
-                }
-                .disabled(uploader.selected.isEmpty || uploader.manifest == nil)
                 Button("Send everything not sent yet") {
                     let ids = uploader.media.filter { uploader.state(of: $0) == .pending }.map(\.id)
                     uploader.start(server: serverURL, ids: Set(ids), limit: batchLimit)
@@ -119,10 +111,81 @@ struct ContentView: View {
                     }
                 }
             }
-            Text(uploader.status).font(.footnote)
+            Text(uploader.status).font(.footnote).foregroundStyle(.secondary)
             if let error = uploader.lastError {
                 Text(error).font(.footnote).foregroundStyle(.red)
             }
+        }
+    }
+}
+
+private struct LibraryTab: View {
+    @AppStorage("serverURL") private var serverURL = ""
+    @AppStorage("batchLimit") private var batchLimit = 500
+    @ObservedObject var uploader: Uploader
+
+    var body: some View {
+        NavigationStack {
+            List(uploader.months, id: \.month) { group in
+                NavigationLink {
+                    MonthView(uploader: uploader, month: group.month, items: group.items)
+                } label: {
+                    MonthRow(uploader: uploader, month: group.month, items: group.items)
+                }
+            }
+            .navigationTitle("Library")
+            .overlay {
+                if uploader.scanning { ProgressView("Reading your photo library…") }
+            }
+            // Outside the month pushes too, so the selection can be sent from any month.
+            .safeAreaInset(edge: .bottom) {
+                if !uploader.selected.isEmpty {
+                    HStack {
+                        Button("Clear") { uploader.selected.removeAll() }
+                        Spacer()
+                        Button("Send \(uploader.selected.count) selected") {
+                            uploader.start(server: serverURL, ids: uploader.selected, limit: batchLimit)
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(uploader.manifest == nil || uploader.running)
+                    }
+                    .padding()
+                    .background(.bar)
+                }
+            }
+        }
+    }
+}
+
+private struct SettingsTab: View {
+    @AppStorage("serverURL") private var serverURL = ""
+    @AppStorage("batchLimit") private var batchLimit = 500
+    @ObservedObject var uploader: Uploader
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    TextField("https://laptop.tailnet.ts.net:5443", text: $serverURL)
+                        .keyboardType(.URL)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        .onSubmit { Task { await uploader.refresh(server: serverURL) } }
+                } header: {
+                    Text("Laptop address")
+                } footer: {
+                    Text(uploader.manifest == nil ? "Not connected" : "Connected")
+                }
+                Section("Sending") {
+                    Picker("Most files per batch", selection: $batchLimit) {
+                        Text("100").tag(100)
+                        Text("500").tag(500)
+                        Text("1,000").tag(1000)
+                        Text("No limit").tag(Int.max)
+                    }
+                }
+            }
+            .navigationTitle("Settings")
         }
     }
 }

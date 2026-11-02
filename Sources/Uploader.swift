@@ -34,20 +34,23 @@ struct Media: Identifiable {
     let asset: PHAsset
     let resources: [PHAssetResource]
     let month: String
+    let keys: [String?] // worked out once: state(of:) runs for every item on screen updates
+    let size: Int64
     var id: String { asset.localIdentifier }
     var filename: String { resources.first?.originalFilename ?? "" }
     var isVideo: Bool { asset.mediaType == .video }
     var isRaw: Bool {
         resources.contains { UTType($0.uniformTypeIdentifier)?.conforms(to: .rawImage) == true }
     }
-    var size: Int64 { resources.compactMap(Uploader.size(of:)).reduce(0, +) }
 }
 
 enum MediaState { case pending, laptop, desktop }
 
 @MainActor
 final class Uploader: ObservableObject {
-    @Published var media: [Media] = []
+    @Published var media: [Media] = [] { didSet { months = Self.groupByMonth(media) } }
+    @Published private(set) var months: [(month: String, items: [Media])] = []
+    @Published private(set) var counts: [MediaState: Int] = [:]
     @Published var manifest: Manifest?
     @Published var selected: Set<String> = []
     @Published var failed: [String: String] = [:]
@@ -78,7 +81,7 @@ final class Uploader: ObservableObject {
     ]
 
     func loadLibrary() async {
-        guard !scanning else { return }
+        guard !scanning, media.isEmpty else { return }
         scanning = true
         defer { scanning = false }
         status = "Reading your photo library…"
@@ -87,7 +90,16 @@ final class Uploader: ObservableObject {
             return
         }
         media = await Task.detached(priority: .userInitiated) { Self.scanLibrary() }.value
+        updateCounts()
         status = "Ready"
+    }
+
+    private static func groupByMonth(_ media: [Media]) -> [(month: String, items: [Media])] {
+        Dictionary(grouping: media, by: \.month).map { (month: $0.key, items: $0.value) }.sorted { $0.month > $1.month }
+    }
+
+    private func updateCounts() {
+        counts = media.reduce(into: [:]) { $0[state(of: $1), default: 0] += 1 }
     }
 
     private nonisolated static func scanLibrary() -> [Media] {
@@ -105,7 +117,13 @@ final class Uploader: ObservableObject {
             let resources = PHAssetResource.assetResources(for: asset).filter { wanted.contains($0.type) }
             guard !resources.isEmpty else { return }
             let date = asset.creationDate ?? asset.modificationDate ?? Date()
-            result.append(Media(asset: asset, resources: resources, month: formatter.string(from: date)))
+            let sizes = resources.map(size(of:))
+            let keys = zip(resources, sizes).map { resource, size in
+                size.map { "\(remoteName(resource, in: resources).lowercased())|\($0)" }
+            }
+            result.append(Media(
+                asset: asset, resources: resources, month: formatter.string(from: date),
+                keys: keys, size: sizes.compactMap { $0 }.reduce(0, +)))
         }
         return result
     }
@@ -130,12 +148,8 @@ final class Uploader: ObservableObject {
         String(name.map { "\\/:*?\"<>|".contains($0) || $0.isNewline ? "_" : $0 })
     }
 
-    private func key(_ resource: PHAssetResource, in media: Media) -> String? {
-        Self.size(of: resource).map { "\(Self.remoteName(resource, in: media.resources).lowercased())|\($0)" }
-    }
-
     func state(of item: Media) -> MediaState {
-        let keys = item.resources.map { key($0, in: item) }
+        let keys = item.keys
         if keys.allSatisfy({ $0.map(desktopKeys.contains) == true }) { return .desktop }
         if keys.allSatisfy({ $0.map { desktopKeys.contains($0) || laptopKeys.contains($0) } == true }) { return .laptop }
         return .pending
@@ -152,7 +166,12 @@ final class Uploader: ObservableObject {
             manifest = latest
             desktopKeys = Set(latest.verified).union(latest.archive)
             laptopKeys = Set(latest.holding)
+            updateCounts()
             if !running { lastError = nil }
+        } catch is CancellationError {
+            return
+        } catch let error as URLError where error.code == .cancelled {
+            return // the view went away, which says nothing about the laptop
         } catch {
             manifest = nil
             if !running { lastError = "Can't reach the laptop: \(error.localizedDescription)" }
@@ -191,8 +210,8 @@ final class Uploader: ObservableObject {
     private func run(base: URL, ids: Set<String>, limit: Int) async throws {
         var queue: [(Media, PHAssetResource)] = []
         for item in media where ids.contains(item.id) {
-            for resource in item.resources {
-                let known = key(resource, in: item).map { desktopKeys.contains($0) || laptopKeys.contains($0) } ?? false
+            for (resource, key) in zip(item.resources, item.keys) {
+                let known = key.map { desktopKeys.contains($0) || laptopKeys.contains($0) } ?? false
                 if !known { queue.append((item, resource)) }
             }
         }
