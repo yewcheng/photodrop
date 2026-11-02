@@ -386,10 +386,10 @@ final class Uploader: ObservableObject {
 
     func mediaURL(key: String) -> URL? {
         guard let base = baseURL else { return nil }
-        var components = URLComponents(url: base.appendingPathComponent("media"), resolvingAgainstBaseURL: false)
-        components?.queryItems = [URLQueryItem(name: "key", value: key)]
-        components?.percentEncodedQuery = components?.percentEncodedQuery?.replacingOccurrences(of: "+", with: "%2B")
-        return components?.url
+        guard var components = URLComponents(url: base.appendingPathComponent("media"), resolvingAgainstBaseURL: false) else { return nil }
+        components.queryItems = [URLQueryItem(name: "key", value: key)]
+        components.percentEncodedQuery = components.percentEncodedQuery?.replacingOccurrences(of: "+", with: "%2B")
+        return components.url
     }
 
     func loadHistory() async {
