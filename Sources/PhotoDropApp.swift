@@ -77,60 +77,60 @@ private struct BackupTab: View {
         NavigationStack {
             Form {
                 Section("Your library") {
-                    LabeledContent("On this phone", value: "\(uploader.media.count)")
-                    LabeledContent("On desktop", value: "\(uploader.counts[.desktop] ?? 0)")
-                    LabeledContent("Waiting on laptop", value: "\(uploader.counts[.laptop] ?? 0)")
-                    LabeledContent("Not sent yet", value: "\(uploader.counts[.pending] ?? 0)")
-                    if let free = uploader.phoneFreeBytes {
-                        LabeledContent("Free space on phone", value: fileSize(free))
+                    HStack(alignment: .top) {
+                        Stat(label: "On phone", value: uploader.media.count)
+                        Stat(label: "On desktop", value: uploader.counts[.desktop] ?? 0)
+                        Stat(label: "On laptop", value: uploader.counts[.laptop] ?? 0)
+                        Stat(label: "To send", value: uploader.counts[.pending] ?? 0)
                     }
                 }
                 connection
                 send
                 if !uploader.deletablePhotos.isEmpty || !uploader.deletableVideos.isEmpty || uploader.deleteMessage != nil {
-                    Section {
+                    Section("Free up phone space") {
                         DeleteButtons(uploader: uploader)
-                        if let message = uploader.deleteMessage { Text(message).font(.footnote) }
-                    } header: {
-                        Text("Free up phone space")
-                    } footer: {
-                        Text(DeleteButtons.warning(uploader))
+                        InfoRow(title: "About deleting", value: uploader.deleteMessage ?? "", info: DeleteButtons.warning(uploader), isWarning: false)
                     }
                 }
                 if autoBackup {
-                    Section("Automatic backup") {
-                        let blockers = uploader.autoBlockers
-                        Text(blockers.isEmpty ? "Ready: sends while the app is open, and when iOS allows it in the background." : "Waiting for: \(blockers.joined(separator: ", "))")
-                            .font(.footnote)
+                    let blockers = uploader.autoBlockers
+                    Section {
+                        InfoRow(
+                            title: "Automatic backup",
+                            value: blockers.isEmpty ? "Ready" : "Waiting",
+                            info: blockers.isEmpty ? "Sends while the app is open, and when iOS allows it in the background." : "Waiting for: \(blockers.joined(separator: ", "))",
+                            isWarning: false)
                     }
                 }
             }
+            .compactForm()
             .navigationTitle("Backup")
+            .navigationBarTitleDisplayMode(.inline)
         }
     }
 
     @ViewBuilder private var connection: some View {
         Section("Connection") {
+            if let free = uploader.phoneFreeBytes {
+                InfoRow(title: "Phone", value: "\(fileSize(free)) free")
+            }
             if let manifest = uploader.manifest {
-                LabeledContent("Laptop", value: "\(fileSize(manifest.laptop_free_bytes)) free")
-                LabeledContent("Desktop", value: manifest.desktop_online ? "Reachable" : "Offline")
-                if !manifest.desktop_online {
-                    Text("Files wait on the laptop until the desktop is back.")
-                        .font(.footnote).foregroundStyle(.secondary)
-                }
-                if !manifest.archive_indexed {
-                    Text("The desktop hasn't been checked yet, so files already there may be sent again. The laptop won't duplicate them on the desktop.")
-                        .font(.footnote).foregroundStyle(.orange)
-                }
-                if let error = manifest.move_error {
-                    Text("Moving to the desktop: \(error)").font(.footnote).foregroundStyle(.orange)
-                }
+                InfoRow(title: "Laptop", value: "\(fileSize(manifest.laptop_free_bytes)) free")
+                InfoRow(title: "Desktop", value: manifest.desktop_online ? "Reachable" : "Offline", info: desktopInfo(manifest))
             } else if serverURL.isEmpty {
-                Text("Add the laptop address in Settings.")
+                InfoRow(title: "Laptop", value: "Not set up", info: "Add the laptop address in Settings.")
             } else {
-                LabeledContent("Laptop", value: "Not connected")
+                InfoRow(title: "Laptop", value: "Not connected", info: uploader.lastError ?? "Check that the laptop is on and connected to Tailscale.")
             }
         }
+    }
+
+    private func desktopInfo(_ manifest: Manifest) -> String? {
+        var notes: [String] = []
+        if !manifest.desktop_online { notes.append("Files wait on the laptop until the desktop is back.") }
+        if !manifest.archive_indexed { notes.append("The desktop hasn't been checked yet, so files already there may be sent again. The laptop won't duplicate them on the desktop.") }
+        if let error = manifest.move_error { notes.append("Moving to the desktop: \(error)") }
+        return notes.isEmpty ? nil : notes.joined(separator: "\n\n")
     }
 
     /// Measured from this batch's own speed, so it includes time spent fetching from iCloud.
@@ -163,10 +163,63 @@ private struct BackupTab: View {
                     }
                 }
             }
-            Text(uploader.status).font(.footnote).foregroundStyle(.secondary)
-            if let error = uploader.lastError {
-                Text(error).font(.footnote).foregroundStyle(.red)
+            InfoRow(title: "Status", value: uploader.status, info: uploader.lastError)
+        }
+    }
+}
+
+private struct Stat: View {
+    let label: String
+    let value: Int
+
+    var body: some View {
+        VStack(spacing: 2) {
+            Text("\(value)").font(.subheadline.monospacedDigit().weight(.semibold)).minimumScaleFactor(0.6).lineLimit(1)
+            Text(label).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+        }
+        .frame(maxWidth: .infinity)
+        .accessibilityElement(children: .combine)
+    }
+}
+
+/// One line, with any longer explanation behind a tappable icon so warnings don't take up the screen.
+private struct InfoRow: View {
+    let title: String
+    let value: String
+    var info: String? = nil
+    var isWarning = true
+    @State private var showing = false
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Text(title)
+            Spacer()
+            Text(value).foregroundStyle(.secondary).lineLimit(1).minimumScaleFactor(0.8)
+            if let info {
+                Button { showing = true } label: {
+                    Image(systemName: isWarning ? "exclamationmark.circle.fill" : "info.circle")
+                        .foregroundStyle(isWarning ? Color.orange : Color.accentColor)
+                }
+                .buttonStyle(.borderless)
+                .accessibilityLabel("More about \(title)")
+                .alert(title, isPresented: $showing) {
+                    Button("OK", role: .cancel) {}
+                } message: {
+                    Text(info)
+                }
             }
+        }
+        .font(.subheadline)
+    }
+}
+
+private extension View {
+    @ViewBuilder func compactForm() -> some View {
+        let tight = environment(\.defaultMinListRowHeight, 34)
+        if #available(iOS 17.0, *) {
+            tight.listSectionSpacing(.compact)
+        } else {
+            tight
         }
     }
 }
