@@ -352,11 +352,14 @@ final class Uploader: ObservableObject {
         guard !running, let base = baseURL else { return }
         running = true
         lastError = nil
+        status = "Getting ready…"
+        (batchDone, batchTotal, bytesDone, bytesTotal, batchStarted) = (0, 0, 0, 0, Date())
         UIApplication.shared.isIdleTimerDisabled = true
         let limit = UserDefaults.standard.integer(forKey: "batchLimit")
         task = Task {
             do {
-                await refresh()
+                // The 20-second refresh keeps this current; waiting on another here delays the first file.
+                if manifest == nil { await refresh() }
                 guard manifest != nil else { throw StopRun(message: lastError ?? "Can't reach the laptop.") }
                 try await run(base: base, ids: ids, limit: limit)
                 status = failed.isEmpty ? "Batch finished" : "Batch finished with \(failed.count) failed"
@@ -366,10 +369,11 @@ final class Uploader: ObservableObject {
                 status = "Paused. Send again to continue."
                 lastError = error.localizedDescription
             }
-            await refresh()
+            updateCounts()
             selected.subtract(media.filter { state(of: $0) != .pending }.map(\.id))
             running = false
             UIApplication.shared.isIdleTimerDisabled = false
+            await refresh()
         }
     }
 

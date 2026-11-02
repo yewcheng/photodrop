@@ -169,9 +169,28 @@ private struct LibraryTab: View {
             .overlay {
                 if uploader.scanning && uploader.media.isEmpty { ProgressView("Reading your photo library…") }
             }
-            // Outside the month pushes too, so the selection can be sent from any month.
-            .safeAreaInset(edge: .bottom) {
-                if !uploader.selected.isEmpty {
+        }
+        // On the stack, not the list, so it also shows inside a month.
+        .safeAreaInset(edge: .bottom) {
+                if uploader.running {
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack {
+                            Text(uploader.batchTotal == 0
+                                ? uploader.status
+                                : "Sending \(uploader.batchDone) of \(uploader.batchTotal) · \(fileSize(uploader.bytesDone)) of \(fileSize(uploader.bytesTotal))")
+                                .font(.footnote)
+                            Spacer()
+                            Button("Stop", role: .destructive) { uploader.stop() }
+                        }
+                        if uploader.batchTotal == 0 {
+                            ProgressView()
+                        } else {
+                            ProgressView(value: Double(min(uploader.batchDone, uploader.batchTotal)), total: Double(uploader.batchTotal))
+                        }
+                    }
+                    .padding()
+                    .background(.bar)
+                } else if !uploader.selected.isEmpty {
                     HStack {
                         Button("Clear") { uploader.selected.removeAll() }
                         Spacer()
@@ -184,7 +203,6 @@ private struct LibraryTab: View {
                     .padding()
                     .background(.bar)
                 }
-            }
         }
     }
 }
