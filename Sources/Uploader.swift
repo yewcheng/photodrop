@@ -62,6 +62,12 @@ struct Media: Identifiable, Codable {
 
 enum MediaState { case pending, laptop, desktop }
 
+struct AlbumInfo: Identifiable {
+    let id: String
+    let title: String
+    let count: Int
+}
+
 @MainActor
 final class Uploader: ObservableObject {
     static let shared = Uploader()
@@ -70,6 +76,13 @@ final class Uploader: ObservableObject {
     @Published var media: [Media] = [] { didSet { months = Self.groupByMonth(media) } }
     @Published private(set) var months: [(month: String, items: [Media])] = []
     @Published private(set) var counts: [MediaState: Int] = [:]
+    @Published private(set) var monthStats: [String: [MediaState: Int]] = [:]
+    @Published private(set) var deletablePhotos: [String] = []
+    @Published private(set) var deletableVideos: [String] = []
+    @Published private(set) var phoneFreeBytes: Int64?
+    @Published private(set) var albums: [AlbumInfo] = []
+    @Published var showDeletePrompt = false
+    @Published var deleteMessage: String?
     @Published var manifest: Manifest?
     @Published var history: [HistoryRow] = []
     @Published var selected: Set<String> = []
@@ -87,6 +100,8 @@ final class Uploader: ObservableObject {
 
     private var desktopKeys = Set<String>()
     private var laptopKeys = Set<String>()
+    private var verifiedKeys = Set<String>()
+    private var countGeneration = 0
     private var task: Task<Void, Never>?
     private var stoppedByUser = false
     private let wifiMonitor = NWPathMonitor(requiredInterfaceType: .wifi) // tells Wi-Fi apart even with Tailscale's VPN on
@@ -153,13 +168,22 @@ final class Uploader: ObservableObject {
         media = await Task.detached(priority: .utility) {
             Self.scanLibrary(known: known) { done, total in
                 Task { @MainActor in Uploader.shared.status = "Reading your photo library: \(done) of \(total) new items" }
+            } partial: { items in
+                // Newest first, so the latest months appear long before the read finishes.
+                Task { @MainActor in
+                    let shelf = Uploader.shared
+                    if shelf.scanning, shelf.media.count < items.count {
+                        shelf.media = items
+                        shelf.updateCounts()
+                    }
+                }
             }
         }.value
         updateCounts()
         if !running { status = "Ready" }
     }
 
-    private nonisolated static func scanLibrary(known: [String: Media], progress: @escaping @Sendable (Int, Int) -> Void) -> [Media] {
+    private nonisolated static func scanLibrary(known: [String: Media], progress: @escaping @Sendable (Int, Int) -> Void, partial: @escaping @Sendable ([Media]) -> Void) -> [Media] {
         let options = PHFetchOptions()
         options.includeHiddenAssets = true
         options.includeAllBurstAssets = true
@@ -179,6 +203,7 @@ final class Uploader: ObservableObject {
             }
             read += 1
             if read % 200 == 0 { progress(read, max(newCount, read)) }
+            if known.isEmpty, read == 200 || read % 2000 == 0 { partial(result) }
             // A long first read survives being closed partway.
             if read % 5000 == 0 { saveCache(result) }
             let resources = PHAssetResource.assetResources(for: asset).filter { wanted.contains($0.type) }
@@ -202,7 +227,99 @@ final class Uploader: ObservableObject {
     }
 
     private func updateCounts() {
-        counts = media.reduce(into: [:]) { $0[state(of: $1), default: 0] += 1 }
+        // Off the main thread: at 97,000 items this would otherwise stall scrolling and taps.
+        countGeneration += 1
+        let generation = countGeneration
+        let (items, desktop, verified, laptop) = (media, desktopKeys, verifiedKeys, laptopKeys)
+        phoneFreeBytes = (try? URL(fileURLWithPath: NSHomeDirectory())
+            .resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey]))?
+            .volumeAvailableCapacityForImportantUsage
+        Task {
+            let result = await Task.detached(priority: .utility) { () -> ([MediaState: Int], [String: [MediaState: Int]], [String], [String]) in
+                var counts: [MediaState: Int] = [:]
+                var months: [String: [MediaState: Int]] = [:]
+                var photos: [String] = []
+                var videos: [String] = []
+                for item in items {
+                    let state = Self.state(keys: item.keys, desktop: desktop, laptop: laptop)
+                    counts[state, default: 0] += 1
+                    months[item.month, default: [:]][state, default: 0] += 1
+                    // Only a checksum match counts here. A name and size match with the old archive isn't proof enough to delete.
+                    if item.keys.allSatisfy({ $0.map(verified.contains) == true }) {
+                        if item.isVideo { videos.append(item.id) } else { photos.append(item.id) }
+                    }
+                }
+                return (counts, months, photos, videos)
+            }.value
+            guard generation == countGeneration else { return }
+            (counts, monthStats, deletablePhotos, deletableVideos) = result
+            offerDeleteIfNew()
+        }
+    }
+
+    private func offerDeleteIfNew() {
+        let total = deletablePhotos.count + deletableVideos.count
+        let offered = UserDefaults.standard.integer(forKey: "deleteOfferedCount")
+        if total < offered { UserDefaults.standard.set(total, forKey: "deleteOfferedCount") }
+        guard total > offered, !running, UIApplication.shared.applicationState == .active else { return }
+        UserDefaults.standard.set(total, forKey: "deleteOfferedCount")
+        showDeletePrompt = true
+    }
+
+    // MARK: Deleting from the phone
+
+    func deleteFromPhone(photos: Bool, videos: Bool) async {
+        guard let base = baseURL else { return }
+        let ids = Set((photos ? deletablePhotos : []) + (videos ? deletableVideos : []))
+        let items = media.filter { ids.contains($0.id) }
+        do {
+            // Ask again right now: the database says it was verified, this says it's still there.
+            var request = URLRequest(url: base.appendingPathComponent("still-there"))
+            request.httpMethod = "POST"
+            request.httpBody = try JSONEncoder().encode(items.flatMap { $0.keys.compactMap { $0 } })
+            let (data, response) = try await session.data(for: request)
+            try Self.check(response)
+            let present = Set(try JSONDecoder().decode([String].self, from: data))
+            let safe = items.filter { $0.keys.allSatisfy { $0.map(present.contains) == true } }.map(\.id)
+            guard !safe.isEmpty else {
+                deleteMessage = "Nothing deleted: the desktop must be reachable so its copies can be confirmed."
+                return
+            }
+            let assets = PHAsset.fetchAssets(withLocalIdentifiers: safe, options: nil)
+            try await PHPhotoLibrary.shared().performChanges { PHAssetChangeRequest.deleteAssets(assets) }
+            let kept = items.count - safe.count
+            deleteMessage = "Moved \(safe.count) to Recently Deleted." + (kept > 0 ? " Kept \(kept) not confirmed on the desktop." : "")
+            await loadLibrary()
+        } catch let error as NSError where error.domain == PHPhotosErrorDomain && error.code == PHPhotosError.userCancelled.rawValue {
+            deleteMessage = "Nothing deleted."
+        } catch {
+            deleteMessage = "Nothing deleted: \(error.localizedDescription)"
+        }
+    }
+
+    // MARK: Albums
+
+    func loadAlbums() async {
+        albums = await Task.detached(priority: .userInitiated) { () -> [AlbumInfo] in
+            var result: [AlbumInfo] = []
+            for type in [PHAssetCollectionType.album, .smartAlbum] {
+                PHAssetCollection.fetchAssetCollections(with: type, subtype: .any, options: nil).enumerateObjects { album, _, _ in
+                    let count = PHAsset.fetchAssets(in: album, options: nil).count
+                    if count > 0 { result.append(AlbumInfo(id: album.localIdentifier, title: album.localizedTitle ?? "Album", count: count)) }
+                }
+            }
+            return result.sorted { $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending }
+        }.value
+    }
+
+    /// Adds the album's unsent items to the selection and says how many that was.
+    func selectAlbum(_ id: String) -> Int {
+        guard let album = PHAssetCollection.fetchAssetCollections(withLocalIdentifiers: [id], options: nil).firstObject else { return 0 }
+        var ids = Set<String>()
+        PHAsset.fetchAssets(in: album, options: nil).enumerateObjects { asset, _, _ in ids.insert(asset.localIdentifier) }
+        let unsent = media.filter { ids.contains($0.id) && state(of: $0) == .pending }.map(\.id)
+        selected.formUnion(unsent)
+        return unsent.count
     }
 
     /// PhotoKit has no public file size. Without it a file just gets sent, and the laptop spots the duplicate.
@@ -234,8 +351,12 @@ final class Uploader: ObservableObject {
     }
 
     func state(of item: Media) -> MediaState {
-        if item.keys.allSatisfy({ $0.map(desktopKeys.contains) == true }) { return .desktop }
-        if item.keys.allSatisfy(isKnown) { return .laptop }
+        Self.state(keys: item.keys, desktop: desktopKeys, laptop: laptopKeys)
+    }
+
+    private nonisolated static func state(keys: [String?], desktop: Set<String>, laptop: Set<String>) -> MediaState {
+        if keys.allSatisfy({ $0.map(desktop.contains) == true }) { return .desktop }
+        if keys.allSatisfy({ $0.map { desktop.contains($0) || laptop.contains($0) } == true }) { return .laptop }
         return .pending
     }
 
@@ -250,6 +371,7 @@ final class Uploader: ObservableObject {
             manifest = latest
             desktopKeys = Set(latest.verified).union(latest.archive)
             laptopKeys = Set(latest.holding)
+            verifiedKeys = Set(latest.verified)
             updateCounts()
             if !running { lastError = nil }
         } catch is CancellationError {

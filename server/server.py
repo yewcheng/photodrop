@@ -192,6 +192,26 @@ def manifest(request: Request) -> dict:
     }
 
 
+@app.post("/still-there")
+async def still_there(request: Request) -> list[str]:
+    """Which of these keys are verified and on the desktop right now. The phone asks before deleting."""
+    check_user(request)
+    keys = await request.json()
+    with db() as conn:
+        rows = [
+            conn.execute("SELECT key, size, dest_path FROM files WHERE key=? AND state='verified'", (k,)).fetchone()
+            for k in keys
+        ]
+    present = []
+    for row in rows:
+        try:
+            if row and os.path.getsize(row["dest_path"]) == row["size"]:
+                present.append(row["key"])
+        except OSError:
+            pass
+    return present
+
+
 @app.get("/history")
 def history(request: Request, limit: int = 300) -> list[dict]:
     check_user(request)

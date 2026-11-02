@@ -118,6 +118,15 @@ with tempfile.TemporaryDirectory() as tmp:
         assert any(r["name"] == "IMG_3.HEIC" and r["state"] == "verified" and "202604_a" in r["dest_path"] for r in rows)
         assert call("GET", "/history", user=None)[0] == 403
 
+        # Delete confirmation: only verified files still on the desktop, and only for the right user.
+        third_key = f"img_3.heic|{len(third)}"
+        ask = lambda keys, user=USER: call("POST", "/still-there", json.dumps(keys).encode(), user=user)
+        assert ask([third_key, "missing|1"])[1] == [third_key]
+        assert ask([third_key], user=None)[0] == 403
+        (dest / "F. 2026/202604_a/IMG_3.HEIC").rename(dest / "F. 2026/202604_a/moved.HEIC")
+        assert ask([third_key])[1] == []
+        (dest / "F. 2026/202604_a/moved.HEIC").rename(dest / "F. 2026/202604_a/IMG_3.HEIC")
+
         # Changing the folder re-checks it and sends new files there.
         new_dest = Path(tmp) / "elsewhere"
         new_dest.mkdir()

@@ -54,6 +54,12 @@ struct ContentView: View {
                 try? await Task.sleep(nanoseconds: 20_000_000_000)
             }
         }
+        .confirmationDialog("Delete transferred media from this phone?", isPresented: $uploader.showDeletePrompt, titleVisibility: .visible) {
+            DeleteButtons(uploader: uploader)
+            Button("Keep everything", role: .cancel) {}
+        } message: {
+            Text(DeleteButtons.warning(uploader))
+        }
         .onChange(of: scenePhase) { phase in
             if phase == .background { Uploader.scheduleBackground() }
             if phase == .active { Task { await uploader.loadLibrary() } }
@@ -74,9 +80,22 @@ private struct BackupTab: View {
                     LabeledContent("On desktop", value: "\(uploader.counts[.desktop] ?? 0)")
                     LabeledContent("Waiting on laptop", value: "\(uploader.counts[.laptop] ?? 0)")
                     LabeledContent("Not sent yet", value: "\(uploader.counts[.pending] ?? 0)")
+                    if let free = uploader.phoneFreeBytes {
+                        LabeledContent("Free space on phone", value: fileSize(free))
+                    }
                 }
                 connection
                 send
+                if !uploader.deletablePhotos.isEmpty || !uploader.deletableVideos.isEmpty || uploader.deleteMessage != nil {
+                    Section {
+                        DeleteButtons(uploader: uploader)
+                        if let message = uploader.deleteMessage { Text(message).font(.footnote) }
+                    } header: {
+                        Text("Free up phone space")
+                    } footer: {
+                        Text(DeleteButtons.warning(uploader))
+                    }
+                }
                 if autoBackup {
                     Section("Automatic backup") {
                         let blockers = uploader.autoBlockers
@@ -127,9 +146,7 @@ private struct BackupTab: View {
     private var send: some View {
         Section("Send") {
             if uploader.running {
-                ProgressView(value: min(Double(uploader.bytesDone), Double(max(uploader.bytesTotal, 1))), total: Double(max(uploader.bytesTotal, 1)))
-                LabeledContent("Files", value: "\(uploader.batchDone) of \(uploader.batchTotal)")
-                LabeledContent("Data", value: "\(fileSize(uploader.bytesDone)) of \(fileSize(uploader.bytesTotal))")
+                TransferProgress(uploader: uploader)
                 LabeledContent("Time left", value: timeLeft)
                 Button("Stop", role: .destructive) { uploader.stop() }
             } else {
@@ -153,31 +170,111 @@ private struct BackupTab: View {
     }
 }
 
-private struct LibraryTab: View {
+/// Separate bars for count and size: one big video can move them very differently.
+private struct TransferProgress: View {
     @ObservedObject var uploader: Uploader
 
     var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            LabeledContent("Files", value: "\(uploader.batchDone) of \(uploader.batchTotal)").font(.footnote)
+            ProgressView(value: Double(min(uploader.batchDone, uploader.batchTotal)), total: Double(max(uploader.batchTotal, 1)))
+            LabeledContent("Size", value: "\(fileSize(uploader.bytesDone)) of \(fileSize(uploader.bytesTotal))").font(.footnote)
+            ProgressView(value: Double(min(uploader.bytesDone, uploader.bytesTotal)), total: Double(max(uploader.bytesTotal, 1)))
+        }
+    }
+}
+
+private struct DeleteButtons: View {
+    @ObservedObject var uploader: Uploader
+
+    static func warning(_ uploader: Uploader) -> String {
+        "Only items confirmed by checksum on the desktop are offered. They go to Recently Deleted for 30 days. With iCloud Photos on, this also removes them from iCloud and your other devices."
+    }
+
+    var body: some View {
+        let photos = uploader.deletablePhotos.count
+        let videos = uploader.deletableVideos.count
+        if photos > 0, videos > 0 {
+            Button("Delete all \(photos + videos)", role: .destructive) { delete(photos: true, videos: true) }
+        }
+        if photos > 0 {
+            Button("Delete only \(photos) photos", role: .destructive) { delete(photos: true, videos: false) }
+        }
+        if videos > 0 {
+            Button("Delete only \(videos) videos", role: .destructive) { delete(photos: false, videos: true) }
+        }
+    }
+
+    private func delete(photos: Bool, videos: Bool) {
+        Task { await uploader.deleteFromPhone(photos: photos, videos: videos) }
+    }
+}
+
+private struct LibraryTab: View {
+    @ObservedObject var uploader: Uploader
+    @State private var showAlbums = false
+    @State private var albumMessage: String?
+
+    private func isSynced(_ month: String) -> Bool {
+        let stats = uploader.monthStats[month] ?? [:]
+        return (stats[.pending] ?? 0) == 0 && (stats[.laptop] ?? 0) == 0 && !stats.isEmpty
+    }
+
+    private func rows(_ groups: [(month: String, items: [Media])]) -> some View {
+        ForEach(groups, id: \.month) { group in
+            NavigationLink {
+                MonthView(uploader: uploader, month: group.month, items: group.items)
+            } label: {
+                MonthRow(uploader: uploader, month: group.month, count: group.items.count)
+            }
+        }
+    }
+
+    var body: some View {
         NavigationStack {
-            List(uploader.months, id: \.month) { group in
-                NavigationLink {
-                    MonthView(uploader: uploader, month: group.month, items: group.items)
-                } label: {
-                    MonthRow(uploader: uploader, month: group.month, items: group.items)
+            List {
+                Picker("View", selection: $showAlbums) {
+                    Text("Months").tag(false)
+                    Text("Albums").tag(true)
+                }
+                .pickerStyle(.segmented)
+                if uploader.scanning {
+                    HStack {
+                        ProgressView()
+                        Text(uploader.status).font(.footnote).foregroundStyle(.secondary)
+                    }
+                }
+                if showAlbums {
+                    Section {
+                        ForEach(uploader.albums) { album in
+                            Button {
+                                let added = uploader.selectAlbum(album.id)
+                                albumMessage = added == 0 ? "\(album.title): nothing left to send." : "\(album.title): selected \(added) not sent yet."
+                            } label: {
+                                LabeledContent(album.title, value: "\(album.count)")
+                            }
+                        }
+                    } header: {
+                        Text("Tap an album to select it")
+                    } footer: {
+                        if let albumMessage { Text(albumMessage) }
+                    }
+                } else {
+                    let synced = uploader.months.filter { isSynced($0.month) }
+                    let toSend = uploader.months.filter { !isSynced($0.month) }
+                    if !toSend.isEmpty { Section("To send") { rows(toSend) } }
+                    if !synced.isEmpty { Section("Fully on desktop") { rows(synced) } }
                 }
             }
             .navigationTitle("Library")
-            .overlay {
-                if uploader.scanning && uploader.media.isEmpty { ProgressView("Reading your photo library…") }
-            }
+            .task { await uploader.loadAlbums() }
         }
         // On the stack, not the list, so it also shows inside a month.
         .safeAreaInset(edge: .bottom) {
                 if uploader.running {
                     VStack(alignment: .leading, spacing: 6) {
                         HStack {
-                            Text(uploader.batchTotal == 0
-                                ? uploader.status
-                                : "Sending \(uploader.batchDone) of \(uploader.batchTotal) · \(fileSize(uploader.bytesDone)) of \(fileSize(uploader.bytesTotal))")
+                            Text(uploader.batchTotal == 0 ? uploader.status : "Sending")
                                 .font(.footnote)
                             Spacer()
                             Button("Stop", role: .destructive) { uploader.stop() }
@@ -185,7 +282,7 @@ private struct LibraryTab: View {
                         if uploader.batchTotal == 0 {
                             ProgressView()
                         } else {
-                            ProgressView(value: Double(min(uploader.batchDone, uploader.batchTotal)), total: Double(uploader.batchTotal))
+                            TransferProgress(uploader: uploader)
                         }
                     }
                     .padding()
@@ -322,13 +419,13 @@ private struct SettingsTab: View {
 private struct MonthRow: View {
     @ObservedObject var uploader: Uploader
     let month: String
-    let items: [Media]
+    let count: Int
 
     var body: some View {
-        let counts = Dictionary(grouping: items) { uploader.state(of: $0) }.mapValues(\.count)
+        let stats = uploader.monthStats[month] ?? [:]
         VStack(alignment: .leading, spacing: 2) {
             Text(monthTitle(month))
-            Text("\(items.count) items · \(counts[.desktop] ?? 0) on desktop · \(counts[.laptop] ?? 0) waiting · \(counts[.pending] ?? 0) to send")
+            Text("\(count) items · \(stats[.desktop] ?? 0) on desktop · \(stats[.laptop] ?? 0) waiting · \(stats[.pending] ?? 0) to send")
                 .font(.caption).foregroundStyle(.secondary)
         }
     }
