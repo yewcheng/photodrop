@@ -647,7 +647,7 @@ final class Uploader: ObservableObject {
         let options = PHAssetResourceRequestOptions()
         options.isNetworkAccessAllowed = true
         let label = resource.originalFilename
-        options.progressHandler = { fraction, _ in
+        options.progressHandler = { fraction in
             Task { @MainActor in Uploader.shared.status = "Downloading \(label) from iCloud: \(Int(fraction * 100))%" }
         }
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
