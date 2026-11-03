@@ -71,8 +71,9 @@ struct AlbumInfo: Identifiable {
 @MainActor
 final class Uploader: ObservableObject {
     static let shared = Uploader()
-    static let backgroundTaskId = "com.photodrop.backup.process"
-    static let sendTaskId = "com.photodrop.backup.send"
+    // Built from the installed ID, which SideStore changes; each form is listed in project.yml.
+    nonisolated static let backgroundTaskId = (Bundle.main.bundleIdentifier ?? "com.photodrop.backup") + ".process"
+    static let sendTaskId = (Bundle.main.bundleIdentifier ?? "com.photodrop.backup") + ".send"
     /// iOS 26's BGContinuedProcessingTask, kept untyped because stored properties can't be availability-gated.
     private var continuedTask: AnyObject?
 

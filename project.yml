@@ -34,6 +34,9 @@ targets:
         BGTaskSchedulerPermittedIdentifiers:
           - com.photodrop.backup.process
           - com.photodrop.backup.send.*
+          # SideStore installs under this team-suffixed ID, and iOS only permits task IDs under the installed one.
+          - com.photodrop.backup.MQZ6U494SP.process
+          - com.photodrop.backup.MQZ6U494SP.send.*
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
     settings:
