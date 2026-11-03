@@ -63,7 +63,10 @@ struct ContentView: View {
         }
         .onChange(of: scenePhase) { phase in
             if phase == .background { Uploader.scheduleBackground() }
-            if phase == .active { Task { await uploader.loadLibrary() } }
+            if phase == .active {
+                uploader.resumeIfInterrupted()
+                Task { await uploader.loadLibrary() }
+            }
         }
     }
 }

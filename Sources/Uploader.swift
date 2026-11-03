@@ -482,32 +482,56 @@ final class Uploader: ObservableObject {
 
     // MARK: Sending
 
-    func start(ids: Set<String>) {
+    /// Set when iOS suspended a send because the app left the screen; it carries on when the app returns.
+    private var interruptedIds: Set<String>?
+
+    func resumeIfInterrupted() {
+        guard let ids = interruptedIds else { return }
+        interruptedIds = nil
+        start(ids: ids, resume: true)
+    }
+
+    func start(ids: Set<String>, resume: Bool = false) {
         guard !running, let base = baseURL else { return }
         running = true
         lastError = nil
         status = "Getting ready…"
-        (batchDone, batchTotal, bytesDone, bytesTotal, batchStarted) = (0, 0, 0, 0, Date())
+        if !resume { (batchDone, batchTotal, bytesDone, bytesTotal, batchStarted) = (0, 0, 0, 0, Date()) }
         UIApplication.shared.isIdleTimerDisabled = true
+        // iOS allows about 30 seconds after leaving the app, then suspends it; this asks for that time.
+        var grace = UIBackgroundTaskIdentifier.invalid
+        grace = UIApplication.shared.beginBackgroundTask {
+            Task { @MainActor in
+                Uploader.shared.interruptedIds = ids
+                Uploader.shared.task?.cancel()
+                UIApplication.shared.endBackgroundTask(grace)
+            }
+        }
         let limit = UserDefaults.standard.integer(forKey: "batchLimit")
         task = Task {
             do {
                 // The 20-second refresh keeps this current; waiting on another here delays the first file.
                 if manifest == nil { await refresh() }
                 guard manifest != nil else { throw StopRun(message: lastError ?? "Can't reach the laptop.") }
-                try await run(base: base, ids: ids, limit: limit)
+                try await run(base: base, ids: ids, limit: limit, resume: resume)
                 status = failed.isEmpty ? "Batch finished" : "Batch finished with \(failed.count) failed"
             } catch is CancellationError {
-                status = "Stopped. Nothing is lost: send again to continue."
+                status = interruptedIds == nil ? "Stopped. Nothing is lost: send again to continue." : "Paused while PhotoDrop was in the background. It continues when you come back."
             } catch {
-                status = "Paused. Send again to continue."
-                lastError = error.localizedDescription
+                if UIApplication.shared.applicationState != .active {
+                    interruptedIds = ids
+                    status = "Paused while PhotoDrop was in the background. It continues when you come back."
+                } else {
+                    status = "Paused. Send again to continue."
+                    lastError = error.localizedDescription
+                }
             }
             updateCounts()
             selected.subtract(media.filter { state(of: $0) != .pending }.map(\.id))
             running = false
             UIApplication.shared.isIdleTimerDisabled = false
             await refresh()
+            UIApplication.shared.endBackgroundTask(grace)
         }
     }
 
@@ -516,7 +540,7 @@ final class Uploader: ObservableObject {
         task?.cancel()
     }
 
-    private func run(base: URL, ids: Set<String>, limit: Int) async throws {
+    private func run(base: URL, ids: Set<String>, limit: Int, resume: Bool) async throws {
         // Whole items only, so a limit never splits a Live Photo's two halves.
         var plan: [Media] = []
         var files = 0
@@ -529,7 +553,10 @@ final class Uploader: ObservableObject {
             files += missing.count
             total += missing.compactMap { item.sizes[$0] }.reduce(0, +)
         }
-        (batchDone, batchTotal, bytesDone, bytesTotal, batchStarted) = (0, files, 0, total, Date())
+        // A resumed send keeps its counts and clock, so the bars carry on instead of starting again.
+        let (doneBefore, bytesBefore) = resume ? (batchDone, bytesDone) : (0, 0)
+        (batchDone, batchTotal, bytesDone, bytesTotal) = (doneBefore, doneBefore + files, bytesBefore, bytesBefore + total)
+        if !resume { batchStarted = Date() }
 
         for item in plan {
             guard let asset = PHAsset.fetchAssets(withLocalIdentifiers: [item.id], options: nil).firstObject else { continue }
