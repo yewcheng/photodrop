@@ -17,6 +17,7 @@ import sqlite3
 import threading
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -31,6 +32,7 @@ DEST = Path((ROOT / "destination.txt").read_text().strip())
 MIN_FREE_BYTES = 10 * 1024**3
 MOVE_INTERVAL = float(os.environ.get("PHOTODROP_MOVE_INTERVAL", 20))
 INDEX_INTERVAL = 3600
+MOVE_WORKERS = 4
 reindex_requested = threading.Event()
 
 MONTH_RE = re.compile(r"^\d{4}(0[1-9]|1[0-2])$")
@@ -147,15 +149,26 @@ def mover_pass() -> None:
         return
     with db() as conn:
         rows = conn.execute("SELECT * FROM files WHERE state='holding' ORDER BY received_at").fetchall()
+    # Same name in the same month waits for the next pass, so two copies never race for one target name.
+    seen, batch = set(), []
     for row in rows:
+        if (row["month"], row["name"].lower()) not in seen:
+            seen.add((row["month"], row["name"].lower()))
+            batch.append(row)
+
+    def attempt(row: sqlite3.Row) -> None:
+        if not os.path.isdir(DEST):
+            return
         try:
             move_one(row)
         except OSError as error:  # share dropped or file problem: the holding copy stays for the next pass
             log.warning("move failed for %s: %s", row["name"], error)
             with db() as conn:
                 conn.execute("UPDATE files SET error=? WHERE key=?", (str(error), row["key"]))
-            if not os.path.isdir(DEST):
-                break
+
+    # Several at once: one file at a time leaves the share idle between copy, read-back and rename.
+    with ThreadPoolExecutor(MOVE_WORKERS) as pool:
+        list(pool.map(attempt, batch))
 
 
 def mover_loop() -> None:
