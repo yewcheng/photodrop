@@ -88,7 +88,8 @@ def move_one(row: sqlite3.Row) -> None:
         # Same name, different contents: keep both, never replace what's in the archive.
         original = Path(row["name"])
         target = folder / f"{original.stem}_{row['sha256'][:8]}{original.suffix}"
-    if not target.exists():
+    copied = not target.exists()
+    if copied:
         part = target.with_name(f"{target.name}.{uuid.uuid4().hex}.part")
         try:
             shutil.copyfile(source, part)
@@ -98,7 +99,8 @@ def move_one(row: sqlite3.Row) -> None:
             os.rename(part, target)
         finally:
             part.unlink(missing_ok=True)
-    if sha256_file(target) != row["sha256"]:
+    # A fresh copy was already read back as the .part; reading it again over the share doubles the time.
+    if not copied and sha256_file(target) != row["sha256"]:
         raise OSError("checksum mismatch reading back from the desktop")
     # Record first: a crash here leaves a spare laptop copy, never a lost file.
     with db() as conn:
@@ -126,13 +128,23 @@ def index_archive() -> None:
             conn.execute("INSERT OR REPLACE INTO meta VALUES ('indexed_at', ?)", (time.time(),))
 
 
-def mover_pass(last_index: float) -> float:
+def index_loop() -> None:
+    # Its own thread: walking ~80,000 files on a slow share takes minutes and must not hold up copying.
+    last_index = 0.0
+    while True:
+        if os.path.isdir(DEST) and (reindex_requested.is_set() or time.time() - last_index > INDEX_INTERVAL):
+            reindex_requested.clear()
+            try:
+                index_archive()
+                last_index = time.time()
+            except Exception:
+                log.exception("archive index failed")
+        reindex_requested.wait(MOVE_INTERVAL)
+
+
+def mover_pass() -> None:
     if not os.path.isdir(DEST):
-        return last_index
-    if reindex_requested.is_set() or time.time() - last_index > INDEX_INTERVAL:
-        reindex_requested.clear()
-        index_archive()
-        last_index = time.time()
+        return
     with db() as conn:
         rows = conn.execute("SELECT * FROM files WHERE state='holding' ORDER BY received_at").fetchall()
     for row in rows:
@@ -144,14 +156,12 @@ def mover_pass(last_index: float) -> float:
                 conn.execute("UPDATE files SET error=? WHERE key=?", (str(error), row["key"]))
             if not os.path.isdir(DEST):
                 break
-    return last_index
 
 
 def mover_loop() -> None:
-    last_index = 0.0
     while True:
         try:
-            last_index = mover_pass(last_index)
+            mover_pass()
         except Exception:
             log.exception("mover pass failed")
         time.sleep(MOVE_INTERVAL)
@@ -161,6 +171,7 @@ def mover_loop() -> None:
 async def lifespan(_: FastAPI):
     init_db()
     threading.Thread(target=mover_loop, daemon=True).start()
+    threading.Thread(target=index_loop, daemon=True).start()
     yield
 
 

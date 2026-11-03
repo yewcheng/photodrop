@@ -620,7 +620,7 @@ final class Uploader: ObservableObject {
                 if UserDefaults.standard.bool(forKey: "wifiOnly"), !onWiFi {
                     throw StopRun(message: "Wi-Fi isn't connected, so sending stopped to save your mobile data. You can change this in Settings.")
                 }
-                status = "Sending \(resource.originalFilename)"
+                status = "Preparing \(resource.originalFilename)"
                 do {
                     try await upload(resource, name: name, item: item, base: base)
                 } catch let error as StopRun {
@@ -646,6 +646,10 @@ final class Uploader: ObservableObject {
         // writeData hands back the stored bytes untouched, and fetches from iCloud when needed.
         let options = PHAssetResourceRequestOptions()
         options.isNetworkAccessAllowed = true
+        let label = resource.originalFilename
+        options.progressHandler = { fraction, _ in
+            Task { @MainActor in Uploader.shared.status = "Downloading \(label) from iCloud: \(Int(fraction * 100))%" }
+        }
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             PHAssetResourceManager.default().writeData(for: resource, toFile: file, options: options) { error in
                 if let error { continuation.resume(throwing: error) } else { continuation.resume() }
@@ -664,12 +668,17 @@ final class Uploader: ObservableObject {
         components.percentEncodedQuery = components.percentEncodedQuery?.replacingOccurrences(of: "+", with: "%2B")
         var request = URLRequest(url: components.url!)
         request.httpMethod = "PUT"
-        let (data, response) = try await session.upload(for: request, fromFile: file)
+        status = "Sending \(label)"
+        // Counts bytes as they go, so a large video moves the bar instead of sitting at zero.
+        let before = bytesDone
+        let (data, response) = try await session.upload(for: request, fromFile: file, delegate: SentBytes { sent in
+            Task { @MainActor in Uploader.shared.bytesDone = before + sent }
+        })
         try Self.check(response)
         let reply = try JSONDecoder().decode(PutReply.self, from: data)
         if reply.state == "holding" { laptopKeys.insert(reply.key) } else { desktopKeys.insert(reply.key) }
         let size = try? file.resourceValues(forKeys: [.fileSizeKey]).fileSize
-        bytesDone += Int64(size ?? 0)
+        bytesDone = before + Int64(size ?? 0)
     }
 
     private static func check(_ response: URLResponse) throws {
@@ -691,5 +700,13 @@ final class Uploader: ObservableObject {
             while let chunk = try handle.read(upToCount: 1 << 20), !chunk.isEmpty { hasher.update(data: chunk) }
             return hasher.finalize().map { String(format: "%02x", $0) }.joined()
         }.value
+    }
+}
+
+private final class SentBytes: NSObject, URLSessionTaskDelegate {
+    let onSent: @Sendable (Int64) -> Void
+    init(_ onSent: @escaping @Sendable (Int64) -> Void) { self.onSent = onSent }
+    func urlSession(_ session: URLSession, task: URLSessionTask, didSendBodyData bytesSent: Int64, totalBytesSent: Int64, totalBytesExpectedToSend: Int64) {
+        onSent(totalBytesSent)
     }
 }
