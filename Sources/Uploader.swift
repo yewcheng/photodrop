@@ -592,6 +592,8 @@ final class Uploader: ObservableObject {
     }
 
     private func run(base: URL, ids: Set<String>, limit: Int, resume: Bool) async throws {
+        // A resumed send finishes the original batch instead of starting a new full-size one on top.
+        let limit = resume ? max(0, batchTotal - batchDone) : limit
         // Whole items only, so a limit never splits a Live Photo's two halves.
         var plan: [Media] = []
         var files = 0
