@@ -452,6 +452,7 @@ private struct SettingsTab: View {
     @AppStorage("serverURL") private var serverURL = ""
     @AppStorage("batchLimit") private var batchLimit = 500
     @AppStorage("wifiOnly") private var wifiOnly = true
+    @AppStorage("hideDeletePrompt") private var hideDeletePrompt = false
     @AppStorage("autoBackup") private var autoBackup = false
     @ObservedObject var uploader: Uploader
     @State private var destination = ""
@@ -495,6 +496,8 @@ private struct SettingsTab: View {
                         Text("No limit").tag(Int.max)
                     }
                     Toggle("Only send on Wi-Fi", isOn: $wifiOnly)
+                    // The Free up phone space buttons on Backup stay either way.
+                    Toggle("Offer to delete after sending", isOn: Binding(get: { !hideDeletePrompt }, set: { hideDeletePrompt = !$0 }))
                 }
                 Section {
                     Toggle("Automatic backup", isOn: $autoBackup)

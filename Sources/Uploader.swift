@@ -268,7 +268,7 @@ final class Uploader: ObservableObject {
         let offered = UserDefaults.standard.integer(forKey: "deleteOfferedCount")
         if total < offered { UserDefaults.standard.set(total, forKey: "deleteOfferedCount") }
         // Wait until the laptop has finished copying, so the offer covers the whole batch.
-        guard total > offered, !running, laptopKeys.isEmpty, UIApplication.shared.applicationState == .active else { return }
+        guard total > offered, !UserDefaults.standard.bool(forKey: "hideDeletePrompt"), !running, laptopKeys.isEmpty, UIApplication.shared.applicationState == .active else { return }
         UserDefaults.standard.set(total, forKey: "deleteOfferedCount")
         showDeletePrompt = true
     }
