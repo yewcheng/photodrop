@@ -72,6 +72,9 @@ struct AlbumInfo: Identifiable {
 final class Uploader: ObservableObject {
     static let shared = Uploader()
     static let backgroundTaskId = "com.photodrop.backup.process"
+    static let sendTaskId = "com.photodrop.backup.send"
+    /// iOS 26's BGContinuedProcessingTask, kept untyped because stored properties can't be availability-gated.
+    private var continuedTask: AnyObject?
 
     @Published var media: [Media] = [] { didSet { months = Self.groupByMonth(media) } }
     @Published private(set) var months: [(month: String, items: [Media])] = []
@@ -90,9 +93,9 @@ final class Uploader: ObservableObject {
     @Published var running = false
     @Published var scanning = false
     @Published var status = "Ready"
-    @Published var batchDone = 0
+    @Published var batchDone = 0 { didSet { reportContinued() } }
     @Published var batchTotal = 0
-    @Published var bytesDone: Int64 = 0
+    @Published var bytesDone: Int64 = 0 { didSet { reportContinued() } }
     @Published var bytesTotal: Int64 = 0
     @Published var batchStarted = Date()
     @Published var lastError: String?
@@ -498,7 +501,17 @@ final class Uploader: ObservableObject {
         status = "Getting ready…"
         if !resume { (batchDone, batchTotal, bytesDone, bytesTotal, batchStarted) = (0, 0, 0, 0, Date()) }
         UIApplication.shared.isIdleTimerDisabled = true
-        // iOS allows about 30 seconds after leaving the app, then suspends it; this asks for that time.
+        #if compiler(>=6.2)
+        if #available(iOS 26.0, *) {
+            // Asks iOS to keep sending after the app is left, with its own progress on the Lock Screen and Dynamic Island.
+            let request = BGContinuedProcessingTaskRequest(
+                identifier: "\(Self.sendTaskId).\(UUID().uuidString)", title: "Sending to laptop", subtitle: "Getting ready…")
+            request.strategy = .fail
+            continuedIds = ids
+            try? BGTaskScheduler.shared.submit(request)
+        }
+        #endif
+        // Fallback before iOS 26: iOS allows about 30 seconds after leaving the app, then suspends it; this asks for that time.
         var grace = UIBackgroundTaskIdentifier.invalid
         grace = UIApplication.shared.beginBackgroundTask {
             Task { @MainActor in
@@ -530,10 +543,48 @@ final class Uploader: ObservableObject {
             selected.subtract(media.filter { state(of: $0) != .pending }.map(\.id))
             running = false
             UIApplication.shared.isIdleTimerDisabled = false
+            finishContinued(success: interruptedIds == nil)
             await refresh()
             UIApplication.shared.endBackgroundTask(grace)
         }
     }
+
+    private var continuedIds: Set<String> = []
+
+    private func reportContinued() {
+        #if compiler(>=6.2)
+        guard #available(iOS 26.0, *), let task = continuedTask as? BGContinuedProcessingTask, batchTotal > 0 else { return }
+        task.progress.totalUnitCount = Int64(batchTotal)
+        task.progress.completedUnitCount = Int64(batchDone)
+        task.updateTitle("Sending to laptop", subtitle: "\(batchDone) of \(batchTotal) files · \(ByteCountFormatter.string(fromByteCount: bytesDone, countStyle: .file)) of \(ByteCountFormatter.string(fromByteCount: bytesTotal, countStyle: .file))")
+        #endif
+    }
+
+    private func finishContinued(success: Bool) {
+        #if compiler(>=6.2)
+        if #available(iOS 26.0, *), let task = continuedTask as? BGContinuedProcessingTask {
+            task.setTaskCompleted(success: success)
+        }
+        #endif
+        continuedTask = nil
+    }
+
+    #if compiler(>=6.2)
+    @available(iOS 26.0, *)
+    func attachContinued(_ task: BGContinuedProcessingTask) {
+        guard running else { task.setTaskCompleted(success: true); return }
+        continuedTask = task
+        let ids = continuedIds
+        // The system's Stop button, or iOS needing the resources back: pause, and carry on when the app is opened.
+        task.expirationHandler = {
+            Task { @MainActor in
+                Uploader.shared.interruptedIds = ids
+                Uploader.shared.task?.cancel()
+            }
+        }
+        reportContinued()
+    }
+    #endif
 
     func stop() {
         stoppedByUser = true // otherwise automatic backup would restart it 20 seconds later

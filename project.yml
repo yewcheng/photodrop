@@ -33,6 +33,7 @@ targets:
           - processing
         BGTaskSchedulerPermittedIdentifiers:
           - com.photodrop.backup.process
+          - com.photodrop.backup.send.*
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
     settings:
