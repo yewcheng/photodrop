@@ -119,7 +119,7 @@ def index_archive() -> None:
                 except OSError:
                     pass
     # An empty walk from a share that just vanished must not wipe the index.
-    if keys or DEST.is_dir():
+    if keys or os.path.isdir(DEST):
         with db() as conn:
             conn.execute("DELETE FROM archive")
             conn.executemany("INSERT OR IGNORE INTO archive VALUES (?)", keys)
@@ -127,7 +127,7 @@ def index_archive() -> None:
 
 
 def mover_pass(last_index: float) -> float:
-    if not DEST.is_dir():
+    if not os.path.isdir(DEST):
         return last_index
     if reindex_requested.is_set() or time.time() - last_index > INDEX_INTERVAL:
         reindex_requested.clear()
@@ -142,7 +142,7 @@ def mover_pass(last_index: float) -> float:
             log.warning("move failed for %s: %s", row["name"], error)
             with db() as conn:
                 conn.execute("UPDATE files SET error=? WHERE key=?", (str(error), row["key"]))
-            if not DEST.is_dir():
+            if not os.path.isdir(DEST):
                 break
     return last_index
 
@@ -185,7 +185,7 @@ def manifest(request: Request) -> dict:
         "holding": [f["key"] for f in waiting],
         "archive": archive,
         "archive_indexed": indexed is not None,
-        "desktop_online": DEST.is_dir(),
+        "desktop_online": os.path.isdir(DEST),
         "destination": str(DEST),
         "holding_bytes": sum(f["size"] for f in waiting),
         "move_error": next((f["error"] for f in waiting if f["error"]), None),
@@ -251,7 +251,7 @@ def set_destination(request: Request, path: str) -> dict:
         conn.execute("DELETE FROM archive")
         conn.execute("DELETE FROM meta WHERE k='indexed_at'")
     reindex_requested.set()
-    return {"destination": str(new), "reachable": new.is_dir()}
+    return {"destination": str(new), "reachable": os.path.isdir(new)}
 
 
 @app.put("/file")
