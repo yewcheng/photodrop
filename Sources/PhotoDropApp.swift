@@ -9,13 +9,6 @@ struct PhotoDropApp: App {
         BGTaskScheduler.shared.register(forTaskWithIdentifier: Uploader.backgroundTaskId, using: nil) { task in
             Task { @MainActor in await Uploader.shared.handleBackground(task as! BGProcessingTask) }
         }
-        #if compiler(>=6.2)
-        if #available(iOS 26.0, *) {
-            BGTaskScheduler.shared.register(forTaskWithIdentifier: Uploader.sendTaskId + ".*", using: nil) { task in
-                Task { @MainActor in Uploader.shared.attachContinued(task as! BGContinuedProcessingTask) }
-            }
-        }
-        #endif
     }
 
     var body: some Scene {

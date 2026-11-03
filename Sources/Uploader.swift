@@ -505,14 +505,20 @@ final class Uploader: ObservableObject {
         #if compiler(>=6.2)
         if #available(iOS 26.0, *) {
             // Asks iOS to keep sending after the app is left, with its own progress on the Lock Screen and Dynamic Island.
-            let request = BGContinuedProcessingTaskRequest(
-                identifier: "\(Self.sendTaskId).\(UUID().uuidString)", title: "Sending to laptop", subtitle: "Getting ready…")
+            // Registered per send: iOS throws an uncatchable exception if the exact ID has no handler.
+            let id = "\(Self.sendTaskId).\(UUID().uuidString)"
+            let registered = BGTaskScheduler.shared.register(forTaskWithIdentifier: id, using: nil) { task in
+                Task { @MainActor in Uploader.shared.attachContinued(task as! BGContinuedProcessingTask) }
+            }
+            let request = BGContinuedProcessingTaskRequest(identifier: id, title: "Sending to laptop", subtitle: "Getting ready…")
             request.strategy = .fail
             continuedIds = ids
             backgroundNote = "Waiting for iOS to accept background sending…"
-            do { try BGTaskScheduler.shared.submit(request) } catch {
+            if !registered {
+                backgroundNote = "iOS wouldn't register background sending, so keep PhotoDrop open (app ID \(Bundle.main.bundleIdentifier ?? "?"))."
+            } else { do { try BGTaskScheduler.shared.submit(request) } catch {
                 backgroundNote = "iOS refused background sending, so keep PhotoDrop open: \(error.localizedDescription) (\((error as NSError).code), app ID \(Bundle.main.bundleIdentifier ?? "?"))"
-            }
+            } }
         }
         #endif
         // Fallback before iOS 26: iOS allows about 30 seconds after leaving the app, then suspends it; this asks for that time.
