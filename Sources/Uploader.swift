@@ -510,7 +510,7 @@ final class Uploader: ObservableObject {
             continuedIds = ids
             backgroundNote = "Waiting for iOS to accept background sending…"
             do { try BGTaskScheduler.shared.submit(request) } catch {
-                backgroundNote = "iOS refused background sending, so keep PhotoDrop open: \(error.localizedDescription) (\((error as NSError).code))"
+                backgroundNote = "iOS refused background sending, so keep PhotoDrop open: \(error.localizedDescription) (\((error as NSError).code), app ID \(Bundle.main.bundleIdentifier ?? "?"))"
             }
         }
         #endif
