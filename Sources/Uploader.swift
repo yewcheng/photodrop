@@ -508,7 +508,10 @@ final class Uploader: ObservableObject {
                 identifier: "\(Self.sendTaskId).\(UUID().uuidString)", title: "Sending to laptop", subtitle: "Getting ready…")
             request.strategy = .fail
             continuedIds = ids
-            try? BGTaskScheduler.shared.submit(request)
+            backgroundNote = "Waiting for iOS to accept background sending…"
+            do { try BGTaskScheduler.shared.submit(request) } catch {
+                backgroundNote = "iOS refused background sending, so keep PhotoDrop open: \(error.localizedDescription) (\((error as NSError).code))"
+            }
         }
         #endif
         // Fallback before iOS 26: iOS allows about 30 seconds after leaving the app, then suspends it; this asks for that time.
@@ -550,6 +553,8 @@ final class Uploader: ObservableObject {
     }
 
     private var continuedIds: Set<String> = []
+    /// Whether iOS took the background send, shown in the app because a refusal is otherwise invisible.
+    @Published private(set) var backgroundNote: String?
 
     private func reportContinued() {
         #if compiler(>=6.2)
@@ -574,6 +579,7 @@ final class Uploader: ObservableObject {
     func attachContinued(_ task: BGContinuedProcessingTask) {
         guard running else { task.setTaskCompleted(success: true); return }
         continuedTask = task
+        backgroundNote = "Sending continues in other apps. Progress shows on the Lock Screen and Dynamic Island."
         let ids = continuedIds
         // The system's Stop button, or iOS needing the resources back: pause, and carry on when the app is opened.
         task.expirationHandler = {

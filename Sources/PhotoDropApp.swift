@@ -180,6 +180,9 @@ private struct BackupTab: View {
                 }
             }
             InfoRow(title: "Status", value: uploader.status, info: uploader.lastError)
+            if uploader.running, let note = uploader.backgroundNote {
+                Text(note).font(.caption).foregroundStyle(.secondary)
+            }
         }
     }
 }
