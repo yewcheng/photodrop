@@ -493,6 +493,7 @@ private struct SettingsTab: View {
                         Text("100").tag(100)
                         Text("500").tag(500)
                         Text("1,000").tag(1000)
+                        Text("5,000").tag(5000)
                         Text("No limit").tag(Int.max)
                     }
                     Toggle("Only send on Wi-Fi", isOn: $wifiOnly)

@@ -525,8 +525,11 @@ final class Uploader: ObservableObject {
         var grace = UIBackgroundTaskIdentifier.invalid
         grace = UIApplication.shared.beginBackgroundTask {
             Task { @MainActor in
-                Uploader.shared.interruptedIds = ids
-                Uploader.shared.task?.cancel()
+                // With iOS 26's background send running, this short grace ending must not stop it.
+                if Uploader.shared.continuedTask == nil {
+                    Uploader.shared.interruptedIds = ids
+                    Uploader.shared.task?.cancel()
+                }
                 UIApplication.shared.endBackgroundTask(grace)
             }
         }
