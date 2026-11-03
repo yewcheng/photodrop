@@ -100,6 +100,8 @@ final class Uploader: ObservableObject {
 
     private var desktopKeys = Set<String>()
     private var laptopKeys = Set<String>()
+    /// Most files seen waiting on the laptop since it was last empty, for the laptop-to-desktop bar.
+    @Published private(set) var moveTotal = 0
     private var verifiedKeys = Set<String>()
     private var countGeneration = 0
     private var task: Task<Void, Never>?
@@ -261,7 +263,8 @@ final class Uploader: ObservableObject {
         let total = deletablePhotos.count + deletableVideos.count
         let offered = UserDefaults.standard.integer(forKey: "deleteOfferedCount")
         if total < offered { UserDefaults.standard.set(total, forKey: "deleteOfferedCount") }
-        guard total > offered, !running, UIApplication.shared.applicationState == .active else { return }
+        // Wait until the laptop has finished copying, so the offer covers the whole batch.
+        guard total > offered, !running, laptopKeys.isEmpty, UIApplication.shared.applicationState == .active else { return }
         UserDefaults.standard.set(total, forKey: "deleteOfferedCount")
         showDeletePrompt = true
     }
@@ -371,6 +374,7 @@ final class Uploader: ObservableObject {
             manifest = latest
             desktopKeys = Set(latest.verified).union(latest.archive)
             laptopKeys = Set(latest.holding)
+            moveTotal = latest.holding.isEmpty ? 0 : max(moveTotal, latest.holding.count)
             verifiedKeys = Set(latest.verified)
             updateCounts()
             if !running { lastError = nil }

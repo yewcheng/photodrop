@@ -117,6 +117,12 @@ private struct BackupTab: View {
             if let manifest = uploader.manifest {
                 InfoRow(title: "Laptop", value: "\(fileSize(manifest.laptop_free_bytes)) free")
                 InfoRow(title: "Desktop", value: manifest.desktop_online ? "Reachable" : "Offline", info: desktopInfo(manifest))
+                if manifest.desktop_online, uploader.moveTotal > 0 {
+                    let done = uploader.moveTotal - manifest.holding.count
+                    ProgressView(value: Double(done), total: Double(uploader.moveTotal)) {
+                        Text("Copying to desktop: \(done) of \(uploader.moveTotal) files").font(.caption)
+                    }
+                }
             } else if serverURL.isEmpty {
                 InfoRow(title: "Laptop", value: "Not set up", info: "Add the laptop address in Settings.")
             } else {
@@ -252,10 +258,10 @@ private struct DeleteButtons: View {
             Button("Delete all \(photos + videos)", role: .destructive) { delete(photos: true, videos: true) }
         }
         if photos > 0 {
-            Button("Delete only \(photos) photos", role: .destructive) { delete(photos: true, videos: false) }
+            Button("Delete \(videos > 0 ? "only " : "")\(photos) photos", role: .destructive) { delete(photos: true, videos: false) }
         }
         if videos > 0 {
-            Button("Delete only \(videos) videos", role: .destructive) { delete(photos: false, videos: true) }
+            Button("Delete \(photos > 0 ? "only " : "")\(videos) videos", role: .destructive) { delete(photos: false, videos: true) }
         }
     }
 
