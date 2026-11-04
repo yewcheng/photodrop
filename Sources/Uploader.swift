@@ -634,25 +634,29 @@ final class Uploader: ObservableObject {
         if !resume { batchStarted = Date() }
         (bytesFinished, bytesInFlight) = (bytesDone, [:])
 
-        var jobs: [(item: Media, resource: PHAssetResource, name: String)] = []
-        for item in plan {
-            guard let asset = PHAsset.fetchAssets(withLocalIdentifiers: [item.id], options: nil).firstObject else { continue }
-            let resources = PHAssetResource.assetResources(for: asset).filter { Self.wanted.contains($0.type) }
-            failed[item.id] = nil
-            for resource in resources {
-                let name = Self.remoteName(resource, in: resources)
-                if !isKnown(Self.key(name, Self.size(of: resource))) { jobs.append((item, resource, name)) }
+        // Photos are looked up only as they're about to be sent: thousands up front froze the app until iOS closed it.
+        var items = plan.makeIterator()
+        var queued: [(item: Media, resource: PHAssetResource, name: String)] = []
+        func nextJob() -> (item: Media, resource: PHAssetResource, name: String)? {
+            while queued.isEmpty, let item = items.next() {
+                guard let asset = PHAsset.fetchAssets(withLocalIdentifiers: [item.id], options: nil).firstObject else { continue }
+                let resources = PHAssetResource.assetResources(for: asset).filter { Self.wanted.contains($0.type) }
+                failed[item.id] = nil
+                for resource in resources {
+                    let name = Self.remoteName(resource, in: resources)
+                    if !isKnown(Self.key(name, Self.size(of: resource))) { queued.append((item, resource, name)) }
+                }
             }
+            return queued.isEmpty ? nil : queued.removeFirst()
         }
         // Several files at once, so one being prepared or checksummed never leaves the link (and iOS's progress) idle.
         try await withThrowingTaskGroup(of: Void.self) { group in
-            var next = jobs.makeIterator()
             for _ in 0..<Self.parallelSends {
-                guard let job = next.next() else { break }
+                guard let job = nextJob() else { break }
                 group.addTask { try await self.sendOne(job.resource, name: job.name, item: job.item, base: base) }
             }
             while try await group.next() != nil {
-                guard let job = next.next() else { continue }
+                guard let job = nextJob() else { continue }
                 group.addTask { try await self.sendOne(job.resource, name: job.name, item: job.item, base: base) }
             }
         }
