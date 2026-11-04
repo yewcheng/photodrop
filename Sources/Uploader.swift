@@ -632,35 +632,64 @@ final class Uploader: ObservableObject {
         let (doneBefore, bytesBefore) = resume ? (batchDone, bytesDone) : (0, 0)
         (batchDone, batchTotal, bytesDone, bytesTotal) = (doneBefore, doneBefore + files, bytesBefore, bytesBefore + total)
         if !resume { batchStarted = Date() }
+        (bytesFinished, bytesInFlight) = (bytesDone, [:])
 
+        var jobs: [(item: Media, resource: PHAssetResource, name: String)] = []
         for item in plan {
             guard let asset = PHAsset.fetchAssets(withLocalIdentifiers: [item.id], options: nil).firstObject else { continue }
             let resources = PHAssetResource.assetResources(for: asset).filter { Self.wanted.contains($0.type) }
             failed[item.id] = nil
             for resource in resources {
                 let name = Self.remoteName(resource, in: resources)
-                if isKnown(Self.key(name, Self.size(of: resource))) { continue }
-                try Task.checkCancellation()
-                if UserDefaults.standard.bool(forKey: "wifiOnly"), !onWiFi {
-                    throw StopRun(message: "Wi-Fi isn't connected, so sending stopped to save your mobile data. You can change this in Settings.")
-                }
-                status = "Preparing \(resource.originalFilename)"
-                do {
-                    try await upload(resource, name: name, item: item, base: base)
-                } catch let error as StopRun {
-                    throw error
-                } catch is CancellationError {
-                    throw CancellationError()
-                } catch let error as URLError {
-                    try Task.checkCancellation() // Stop cancels the request; that isn't a lost connection
-                    throw StopRun(message: "Lost the laptop: \(error.localizedDescription)")
-                } catch {
-                    failed[item.id] = error.localizedDescription
-                    lastError = "\(resource.originalFilename): \(error.localizedDescription)"
-                }
-                batchDone += 1
+                if !isKnown(Self.key(name, Self.size(of: resource))) { jobs.append((item, resource, name)) }
             }
         }
+        // Several files at once, so one being prepared or checksummed never leaves the link (and iOS's progress) idle.
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            var next = jobs.makeIterator()
+            for _ in 0..<Self.parallelSends {
+                guard let job = next.next() else { break }
+                group.addTask { try await self.sendOne(job.resource, name: job.name, item: job.item, base: base) }
+            }
+            while try await group.next() != nil {
+                guard let job = next.next() else { continue }
+                group.addTask { try await self.sendOne(job.resource, name: job.name, item: job.item, base: base) }
+            }
+        }
+    }
+
+    private static let parallelSends = 3
+
+    private func sendOne(_ resource: PHAssetResource, name: String, item: Media, base: URL) async throws {
+        try Task.checkCancellation()
+        if UserDefaults.standard.bool(forKey: "wifiOnly"), !onWiFi {
+            throw StopRun(message: "Wi-Fi isn't connected, so sending stopped to save your mobile data. You can change this in Settings.")
+        }
+        status = "Preparing \(resource.originalFilename)"
+        do {
+            try await upload(resource, name: name, item: item, base: base)
+        } catch let error as StopRun {
+            throw error
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch let error as URLError {
+            try Task.checkCancellation() // Stop cancels the request; that isn't a lost connection
+            throw StopRun(message: "Lost the laptop: \(error.localizedDescription)")
+        } catch {
+            failed[item.id] = error.localizedDescription
+            lastError = "\(resource.originalFilename): \(error.localizedDescription)"
+        }
+        batchDone += 1
+    }
+
+    /// Bytes of finished files, plus bytes so far of each file still sending; bytesDone is their sum.
+    private var bytesFinished: Int64 = 0
+    private var bytesInFlight: [UUID: Int64] = [:]
+
+    private func setSent(_ token: UUID, _ sent: Int64?) {
+        guard bytesInFlight[token] != nil else { return } // a late update after the file finished
+        bytesInFlight[token] = sent
+        bytesDone = bytesFinished + bytesInFlight.values.reduce(0, +)
     }
 
     private func upload(_ resource: PHAssetResource, name: String, item: Media, base: URL) async throws {
@@ -694,15 +723,17 @@ final class Uploader: ObservableObject {
         request.httpMethod = "PUT"
         status = "Sending \(label)"
         // Counts bytes as they go, so a large video moves the bar instead of sitting at zero.
-        let before = bytesDone
+        let token = UUID()
+        bytesInFlight[token] = 0
+        defer { setSent(token, nil) }
         let (data, response) = try await session.upload(for: request, fromFile: file, delegate: SentBytes { sent in
-            Task { @MainActor in Uploader.shared.bytesDone = before + sent }
+            Task { @MainActor in Uploader.shared.setSent(token, sent) }
         })
         try Self.check(response)
         let reply = try JSONDecoder().decode(PutReply.self, from: data)
         if reply.state == "holding" { laptopKeys.insert(reply.key) } else { desktopKeys.insert(reply.key) }
         let size = try? file.resourceValues(forKeys: [.fileSizeKey]).fileSize
-        bytesDone = before + Int64(size ?? 0)
+        bytesFinished += Int64(size ?? 0)
     }
 
     private static func check(_ response: URLResponse) throws {
