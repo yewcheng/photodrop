@@ -566,11 +566,17 @@ final class Uploader: ObservableObject {
     /// Whether iOS took the background send, shown in the app because a refusal is otherwise invisible.
     @Published private(set) var backgroundNote: String?
 
+    private var lastContinuedTitle = Date.distantPast
+
     private func reportContinued() {
         #if compiler(>=6.2)
         guard #available(iOS 26.0, *), let task = continuedTask as? BGContinuedProcessingTask, batchTotal > 0 else { return }
-        task.progress.totalUnitCount = Int64(batchTotal)
-        task.progress.completedUnitCount = Int64(batchDone)
+        // iOS ends a task whose progress stops moving, so count bytes: they move during a long video, files don't.
+        task.progress.totalUnitCount = max(bytesTotal, 1)
+        task.progress.completedUnitCount = min(bytesDone, bytesTotal)
+        // Byte updates arrive many times a second; the title only needs one.
+        guard Date().timeIntervalSince(lastContinuedTitle) > 1 else { return }
+        lastContinuedTitle = Date()
         task.updateTitle("Sending to laptop", subtitle: "\(batchDone) of \(batchTotal) files · \(ByteCountFormatter.string(fromByteCount: bytesDone, countStyle: .file)) of \(ByteCountFormatter.string(fromByteCount: bytesTotal, countStyle: .file))")
         #endif
     }
