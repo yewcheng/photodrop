@@ -1,4 +1,4 @@
-﻿"""Receives original photo/video files from the PhotoDrop iPhone app.
+"""Receives original photo/video files from the PhotoDrop iPhone app.
 
 Two stages, like Copy-iPhonePhotos v5: phone -> laptop holding folder -> home
 desktop share. A holding copy is deleted only after the copy on the share has
@@ -270,7 +270,7 @@ def wifi_name() -> str:
 def ago(t: float) -> str:
     seconds = time.time() - t
     if seconds < 60:
-        return "<b class=on>â— Connected now</b>"
+        return "<b class=on>● Connected now</b>"
     for size, unit in ((86400, "day"), (3600, "hour"), (60, "minute")):
         if seconds >= size:
             n = int(seconds // size)
@@ -289,9 +289,10 @@ def pair_page(request: Request) -> str:
         devices = conn.execute("SELECT token_hash, name, paired_at, last_seen FROM devices ORDER BY paired_at").fetchall()
         waiting = conn.execute("SELECT COUNT(*), COALESCE(SUM(size), 0) FROM files WHERE state='holding'").fetchone()
     phones = "".join(
-        f"<div class=phone><div><b>{html.escape(d['name'])}</b><span>{ago(d['last_seen'])} Â· paired "
+        f"<div class=phone><div><b>{html.escape(d['name'])}</b><span>{ago(d['last_seen'])} · paired "
         f"{time.strftime('%d %b %Y', time.localtime(d['paired_at']))}</span></div>"
-        f"<form method=post action='/unpair?token_hash={d['token_hash']}'><button class=quiet>Unpair</button></form></div>"
+        f"<div class=actions><button class=quiet onclick=\"rename('{d['token_hash']}', {html.escape(repr(d['name']))})\">Rename</button>"
+        f"<form method=post action='/unpair?token_hash={d['token_hash']}'><button class=quiet>Unpair</button></form></div></div>"
         for d in devices
     ) or "<p class=muted>No phones yet. Scan the code to pair one.</p>"
     reachable = os.path.isdir(DEST)
@@ -324,15 +325,15 @@ code{{display:block;overflow-wrap:anywhere;font-size:.88rem;margin-top:.15rem}}
 .warn{{color:var(--warn);font-size:.88rem}}
 button{{font:inherit;border:0;border-radius:10px;padding:.5rem 1rem;background:var(--accent);color:#fff;cursor:pointer;white-space:nowrap}}
 button.quiet{{background:transparent;color:var(--muted);border:1px solid var(--line)}}
-form{{margin:0}}
+form{{margin:0}} .actions{{display:flex;gap:.5rem}}
 </style>
 <header><h1>PhotoDrop</h1>
-<div class=pill>Wi-Fi <b>{html.escape(wifi_name())}</b> Â· {lan_ip()}</div></header>
+<div class=pill>Wi-Fi <b>{html.escape(wifi_name())}</b> · {lan_ip()}</div></header>
 <main>
 <section class=card>
 <h2>Pair a phone</h2>
-<p class=muted>On the phone: PhotoDrop â†’ Settings â†’ Pair with laptop. It must be on the same Wi-Fi.</p>
-<div class=qr>{segno.make(link, error="m").svg_inline(scale=6)}</div>
+<p class=muted>On the phone: PhotoDrop → Settings → Pair with laptop. It must be on the same Wi-Fi.</p>
+<div class=qr>{segno.make(link, error="m").svg_inline(scale=6, border=2, omitsize=True)}</div>
 <div class=code>{pairing['code']}</div>
 <div class=addr>{address}</div>
 <p><small>Or type the address and code. Each code works once; a new one appears after it's used or after 5 minutes.</small></p>
@@ -342,14 +343,28 @@ form{{margin:0}}
 <section class=card><h2>Folders</h2>
 <div class=folder><div><b>Final folder</b><span>Where photos end up</span><code>{html.escape(str(DEST))}</code>
 {"" if reachable else "<div class=warn>Not reachable right now. Files wait on this laptop until it is.</div>"}</div>
-<form method=post action="/choose?which=final"><button>Chooseâ€¦</button></form></div>
-<div class=folder><div><b>Waiting folder</b><span>{waiting[0]} file{"" if waiting[0] == 1 else "s"} waiting Â· {waiting[1] / 1024**3:.1f} GB</span>
+<form method=post action="/choose?which=final"><button>Choose…</button></form></div>
+<div class=folder><div><b>Waiting folder</b><span>{waiting[0]} file{"" if waiting[0] == 1 else "s"} waiting · {waiting[1] / 1024**3:.1f} GB</span>
 <code>{html.escape(str(HOLDING))}</code></div>
-<form method=post action="/choose?which=waiting"><button class=quiet>Chooseâ€¦</button></form></div>
+<form method=post action="/choose?which=waiting"><button>Choose…</button></form></div>
 </section>
 <p><small>Updates every 10 seconds. This page only opens on this laptop.</small></p>
 </div>
-</main>"""
+</main>
+<script>
+function rename(id, current) {{
+  const name = prompt("Name this phone", current);
+  if (name && name.trim()) fetch("/rename?token_hash=" + id + "&name=" + encodeURIComponent(name.trim()), {{method: "POST"}}).then(() => location.reload());
+}}
+</script>"""
+
+
+@app.post("/rename")
+def rename(request: Request, token_hash: str, name: str) -> dict:
+    check_local(request)
+    with db() as conn:
+        conn.execute("UPDATE devices SET name=? WHERE token_hash=?", (name.strip()[:60], token_hash))
+    return {"ok": True}
 
 
 def pick_folder(title: str, start: Path) -> str:

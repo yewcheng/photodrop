@@ -185,6 +185,12 @@ with tempfile.TemporaryDirectory() as tmp:
         conn = sqlite3.connect(root / "photodrop.db")
         th = conn.execute("SELECT token_hash FROM devices").fetchone()[0]
         conn.close()
+        urllib.request.urlopen(urllib.request.Request(BASE + f"/rename?token_hash={th}&name=Mum%27s%20phone", method="POST"))
+        assert "Mum&#x27;s phone" in page()
+        import sqlite3
+        conn = sqlite3.connect(root / "photodrop.db")
+        th = conn.execute("SELECT token_hash FROM devices").fetchone()[0]
+        conn.close()
         urllib.request.urlopen(urllib.request.Request(BASE + "/unpair?token_hash=" + th, method="POST"))
         try:
             with_token()

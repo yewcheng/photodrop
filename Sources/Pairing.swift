@@ -55,7 +55,7 @@ enum Pairing {
         var request = URLRequest(url: base.appendingPathComponent("pair"))
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = try JSONEncoder().encode(["code": code.filter(\.isNumber), "name": UIDevice.current.name])
+        request.httpBody = try JSONEncoder().encode(["code": code.filter(\.isNumber), "name": modelName])
         request.timeoutInterval = 15
         let data: Data, response: URLResponse
         do {
@@ -80,6 +80,25 @@ enum Pairing {
         UserDefaults.standard.set(seen, forKey: "pinnedCert")
         UserDefaults.standard.set(base.host, forKey: "pinnedHost")
         UserDefaults.standard.set(base.absoluteString, forKey: "serverURL")
+    }
+
+    /// iOS only gives apps "iPhone" for the phone's own name, so the laptop lists it by model instead.
+    static var modelName: String {
+        var info = utsname()
+        uname(&info)
+        let id = withUnsafeBytes(of: info.machine) { String(decoding: $0.prefix { $0 != 0 }, as: UTF8.self) }
+        // shortcut: covers iPhone 12 to 17; newer models show their identifier (e.g. iPhone19,1) until added here.
+        let models = [
+            "iPhone13,1": "iPhone 12 mini", "iPhone13,2": "iPhone 12", "iPhone13,3": "iPhone 12 Pro", "iPhone13,4": "iPhone 12 Pro Max",
+            "iPhone14,4": "iPhone 13 mini", "iPhone14,5": "iPhone 13", "iPhone14,2": "iPhone 13 Pro", "iPhone14,3": "iPhone 13 Pro Max",
+            "iPhone14,6": "iPhone SE (3rd gen)", "iPhone14,7": "iPhone 14", "iPhone14,8": "iPhone 14 Plus",
+            "iPhone15,2": "iPhone 14 Pro", "iPhone15,3": "iPhone 14 Pro Max",
+            "iPhone15,4": "iPhone 15", "iPhone15,5": "iPhone 15 Plus", "iPhone16,1": "iPhone 15 Pro", "iPhone16,2": "iPhone 15 Pro Max",
+            "iPhone17,3": "iPhone 16", "iPhone17,4": "iPhone 16 Plus", "iPhone17,1": "iPhone 16 Pro", "iPhone17,2": "iPhone 16 Pro Max",
+            "iPhone17,5": "iPhone 16e",
+            "iPhone18,3": "iPhone 17", "iPhone18,1": "iPhone 17 Pro", "iPhone18,2": "iPhone 17 Pro Max", "iPhone18,4": "iPhone Air",
+        ]
+        return models[id] ?? (id.isEmpty ? UIDevice.current.model : id)
     }
 
     static func unpair() {
