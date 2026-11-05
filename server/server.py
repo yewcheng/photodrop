@@ -4,11 +4,16 @@ Two stages, like Copy-iPhonePhotos v5: phone -> laptop holding folder -> home
 desktop share. A holding copy is deleted only after the copy on the share has
 been read back and its SHA-256 matches.
 
-Binds to localhost only; `tailscale serve` is the sole way in, and it sets the
-Tailscale-User-Login header that authenticates the caller.
+Two ways in: `tailscale serve` to the localhost listener, which sets the
+Tailscale-User-Login header that authenticates the caller; and run.py's HTTPS
+listener on the home network, where a phone paired by QR code sends its token.
 """
 
 import hashlib
+import hmac
+import html
+import secrets
+import socket
 import logging
 import os
 import re
@@ -21,8 +26,9 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from pathlib import Path
 
+import segno
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 
 ROOT = Path(os.environ.get("PHOTODROP_ROOT", Path.home() / "PhotoDrop"))
 HOLDING = ROOT / "holding"
@@ -33,6 +39,11 @@ MIN_FREE_BYTES = 10 * 1024**3
 MOVE_INTERVAL = float(os.environ.get("PHOTODROP_MOVE_INTERVAL", 20))
 INDEX_INTERVAL = 3600
 MOVE_WORKERS = 4
+LAN_PORT = 8865
+CERT, CERT_KEY = ROOT / "tls.crt", ROOT / "tls.key"
+PAIR_SECONDS = 300
+PAIR_TRIES = 5
+pairing: dict = {}  # the one live code: {"code", "expires", "tries"}
 reindex_requested = threading.Event()
 
 MONTH_RE = re.compile(r"^\d{4}(0[1-9]|1[0-2])$")
@@ -58,6 +69,8 @@ def init_db() -> None:
         )
         conn.execute("CREATE TABLE IF NOT EXISTS archive (key TEXT PRIMARY KEY)")
         conn.execute("CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v REAL)")
+        # Only token hashes are kept, so a copied database can't be used to pose as a phone.
+        conn.execute("CREATE TABLE IF NOT EXISTS devices (token_hash TEXT PRIMARY KEY, name TEXT, paired_at REAL, last_seen REAL)")
 
 
 def file_key(name: str, size: int) -> str:
@@ -191,9 +204,104 @@ async def lifespan(_: FastAPI):
 app = FastAPI(lifespan=lifespan)
 
 
+def ensure_cert() -> str:
+    """Self-signed certificate for the home-network listener; returns its SHA-256, which the QR code carries."""
+    import datetime
+
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from cryptography.x509.oid import NameOID
+
+    if not CERT.exists():
+        key = ec.generate_private_key(ec.SECP256R1())
+        name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "PhotoDrop")])
+        now = datetime.datetime.now(datetime.timezone.utc)
+        cert = (
+            x509.CertificateBuilder().subject_name(name).issuer_name(name).public_key(key.public_key())
+            .serial_number(x509.random_serial_number()).not_valid_before(now)
+            .not_valid_after(now + datetime.timedelta(days=3650)).sign(key, hashes.SHA256())
+        )
+        CERT_KEY.write_bytes(key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption()))
+        CERT.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
+    der = x509.load_pem_x509_certificate(CERT.read_bytes()).public_bytes(serialization.Encoding.DER)
+    return hashlib.sha256(der).hexdigest()
+
+
+def token_hash(token: str) -> str:
+    return hashlib.sha256(token.encode()).hexdigest()
+
+
 def check_user(request: Request) -> None:
-    if request.headers.get("tailscale-user-login") != ALLOWED_USER:
+    token = request.headers.get("x-photodrop-token")
+    if token:
+        with db() as conn:
+            if conn.execute("UPDATE devices SET last_seen=? WHERE token_hash=?", (time.time(), token_hash(token))).rowcount:
+                return
+        raise HTTPException(403, "This phone was unpaired. Pair it again from the laptop.")
+    # The header is only trustworthy on the localhost listener, where tailscale serve sets it.
+    if request.url.scheme != "http" or request.headers.get("tailscale-user-login") != ALLOWED_USER:
         raise HTTPException(403, "not allowed")
+
+
+def check_local(request: Request) -> None:
+    """Pairing admin: only someone at the laptop itself, not the home network or the tailnet."""
+    if request.url.scheme != "http" or request.client.host != "127.0.0.1" or request.headers.get("tailscale-user-login"):
+        raise HTTPException(403, "Open this on the laptop itself.")
+
+
+def lan_ip() -> str:
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+        s.connect(("192.0.2.1", 9))  # sends nothing; just picks the interface the home network is on
+        return s.getsockname()[0]
+
+
+@app.get("/pair", response_class=HTMLResponse)
+def pair_page(request: Request) -> str:
+    check_local(request)
+    pairing.update(code=f"{secrets.randbelow(10**6):06d}", expires=time.time() + PAIR_SECONDS, tries=0)
+    address = f"https://{lan_ip()}:{LAN_PORT}"
+    link = f"photodrop://pair?u={address}&c={pairing['code']}&f={ensure_cert()}"
+    with db() as conn:
+        devices = conn.execute("SELECT token_hash, name, paired_at FROM devices ORDER BY paired_at").fetchall()
+    rows = "".join(
+        f"<li>{html.escape(d['name'])} · paired {time.strftime('%d %b %Y', time.localtime(d['paired_at']))} "
+        f"<form method=post action='/unpair?token_hash={d['token_hash']}' style=display:inline><button>Unpair</button></form></li>"
+        for d in devices
+    ) or "<li>None yet</li>"
+    return f"""<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width"><title>Pair a phone</title>
+<style>body{{font-family:system-ui;max-width:32rem;margin:2rem auto;padding:0 1rem}}.code{{font-size:2.5rem;letter-spacing:.3rem;font-weight:600}}</style>
+<h1>Pair a phone with PhotoDrop</h1>
+<p>On the phone, open PhotoDrop → Settings → Pair with laptop and scan this. The phone must be on the same Wi-Fi.</p>
+{segno.make(link, error="m").svg_inline(scale=6)}
+<p>Or type the address and code:</p><p><b>{address}</b></p><p class=code>{pairing['code']}</p>
+<p>The code works once and expires in 5 minutes. Reload this page for a new one.</p>
+<h2>Paired phones</h2><ul>{rows}</ul>"""
+
+
+@app.post("/pair")
+async def pair(request: Request) -> dict:
+    body = await request.json()
+    code, name = str(body.get("code", "")), str(body.get("name", "Phone"))[:60]
+    if not pairing.get("code") or time.time() > pairing["expires"] or pairing["tries"] >= PAIR_TRIES:
+        pairing.clear()
+        raise HTTPException(403, "No pairing code is live. Reload the pairing page on the laptop.")
+    pairing["tries"] += 1  # five guesses at a million codes, then the code is gone
+    if not hmac.compare_digest(code, pairing["code"]):
+        raise HTTPException(403, "Wrong code.")
+    pairing.clear()  # one phone per code
+    token = secrets.token_urlsafe(32)
+    with db() as conn:
+        conn.execute("INSERT INTO devices VALUES (?, ?, ?, ?)", (token_hash(token), name, time.time(), time.time()))
+    return {"token": token}
+
+
+@app.post("/unpair")
+def unpair(request: Request, token_hash: str) -> RedirectResponse:
+    check_local(request)
+    with db() as conn:
+        conn.execute("DELETE FROM devices WHERE token_hash=?", (token_hash,))
+    return RedirectResponse("/pair", 303)
 
 
 @app.get("/manifest")

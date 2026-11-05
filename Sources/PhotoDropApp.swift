@@ -33,6 +33,8 @@ private func monthTitle(_ month: String) -> String {
 struct ContentView: View {
     @Environment(\.scenePhase) private var scenePhase
     @ObservedObject private var uploader = Uploader.shared
+    /// A pairing QR code scanned with the Camera app opens PhotoDrop with this link.
+    @State private var pairLink: String?
 
     var body: some View {
         TabView {
@@ -60,6 +62,10 @@ struct ContentView: View {
             Button("Keep everything", role: .cancel) {}
         } message: {
             Text(DeleteButtons.warning(uploader))
+        }
+        .onOpenURL { pairLink = $0.absoluteString }
+        .sheet(isPresented: Binding(get: { pairLink != nil }, set: { if !$0 { pairLink = nil } })) {
+            PairSheet(scanned: pairLink) { Task { await uploader.refresh() } }
         }
         .onChange(of: scenePhase) { phase in
             if phase == .background { Uploader.scheduleBackground() }
@@ -458,10 +464,31 @@ private struct SettingsTab: View {
     @ObservedObject var uploader: Uploader
     @State private var destination = ""
     @State private var destinationMessage: String?
+    @State private var pairing = false
+    @AppStorage("pinnedCert") private var pinnedCert = ""
 
     var body: some View {
         NavigationStack {
             Form {
+                Section {
+                    Button(pinnedCert.isEmpty ? "Pair with laptop" : "Pair again") { pairing = true }
+                    if !pinnedCert.isEmpty {
+                        Button("Unpair", role: .destructive) {
+                            Pairing.unpair()
+                            pinnedCert = ""
+                            Task { await uploader.refresh() }
+                        }
+                    }
+                } header: {
+                    Text("Laptop")
+                } footer: {
+                    Text(pinnedCert.isEmpty
+                         ? "Scan the code from the laptop's pairing page. Works on home Wi-Fi without Tailscale."
+                         : "Paired. Everything sent is encrypted, and only this laptop is trusted.")
+                }
+                .sheet(isPresented: $pairing) {
+                    PairSheet { Task { await uploader.refresh() } }
+                }
                 Section {
                     TextField("https://laptop.tailnet.ts.net:5443", text: $serverURL)
                         .keyboardType(.URL)

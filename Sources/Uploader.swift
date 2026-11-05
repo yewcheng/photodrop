@@ -111,13 +111,21 @@ final class Uploader: ObservableObject {
     private var task: Task<Void, Never>?
     private var stoppedByUser = false
     private let wifiMonitor = NWPathMonitor(requiredInterfaceType: .wifi) // tells Wi-Fi apart even with Tailscale's VPN on
-    private let session: URLSession = {
+    private var sessionCache: (token: String?, session: URLSession)?
+    /// Rebuilt when pairing changes the token, which every request carries.
+    private var session: URLSession {
+        let token = Pairing.token
+        if let sessionCache, sessionCache.token == token { return sessionCache.session }
+        sessionCache?.session.finishTasksAndInvalidate()
         let config = URLSessionConfiguration.default
         config.waitsForConnectivity = true // ride out Wi-Fi handoffs while walking around
         config.timeoutIntervalForRequest = 300
         config.timeoutIntervalForResource = 6 * 3600
-        return URLSession(configuration: config)
-    }()
+        if let token { config.httpAdditionalHeaders = ["X-PhotoDrop-Token": token] }
+        let session = URLSession(configuration: config, delegate: CertPin(), delegateQueue: nil)
+        sessionCache = (token, session)
+        return session
+    }
 
     private init() {
         UserDefaults.standard.register(defaults: ["wifiOnly": true, "batchLimit": 500])

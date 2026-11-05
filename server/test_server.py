@@ -161,6 +161,42 @@ with tempfile.TemporaryDirectory() as tmp:
             assert put(bad, b"x")[0] == 400, bad
         assert put("ok.txt", b"x", month="../..")[0] == 400
         assert put("ok.txt", b"x", month="202613")[0] == 400
+
+        # Pairing: the page is for the laptop itself, a code works once, and an unpaired phone is shut out.
+        def page(headers={}):
+            with urllib.request.urlopen(urllib.request.Request(BASE + "/pair", headers=headers)) as r:
+                return r.read().decode()
+        try:
+            page({"Tailscale-User-Login": USER})
+            raise AssertionError("tailnet must not reach the pairing page")
+        except urllib.error.HTTPError as e:
+            assert e.code == 403
+        code = page().split("class=code>")[1][:6]
+        pair = lambda c: call("POST", "/pair", json.dumps({"code": c, "name": "Test phone"}).encode(), user=None)
+        assert pair("000000" if code != "000000" else "111111")[0] == 403
+        status, reply = pair(code)
+        assert status == 200
+        assert pair(code)[0] == 403  # used up
+        token = reply["token"]
+        with_token = lambda: urllib.request.urlopen(urllib.request.Request(BASE + "/manifest", headers={"X-PhotoDrop-Token": token})).status
+        assert with_token() == 200
+        assert "Test phone" in page()
+        import sqlite3
+        conn = sqlite3.connect(root / "photodrop.db")
+        th = conn.execute("SELECT token_hash FROM devices").fetchone()[0]
+        conn.close()
+        urllib.request.urlopen(urllib.request.Request(BASE + "/unpair?token_hash=" + th, method="POST"))
+        try:
+            with_token()
+            raise AssertionError("unpaired phone still allowed")
+        except urllib.error.HTTPError as e:
+            assert e.code == 403
+        # Five wrong guesses kill the code.
+        code = page().split("class=code>")[1][:6]
+        wrong = "000000" if code != "000000" else "111111"
+        for _ in range(5):
+            pair(wrong)
+        assert pair(code)[0] == 403
         print("ok")
     finally:
         proc.terminate()

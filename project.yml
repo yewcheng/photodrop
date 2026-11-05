@@ -29,6 +29,13 @@ targets:
         CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
         UILaunchScreen: {}
         NSPhotoLibraryUsageDescription: PhotoDrop copies your original photos and videos to your laptop.
+        NSCameraUsageDescription: PhotoDrop scans the pairing code shown on your laptop.
+        NSLocalNetworkUsageDescription: PhotoDrop sends your photos straight to your laptop on your home Wi-Fi.
+        # Scanning the pairing QR code with the Camera app opens PhotoDrop.
+        CFBundleURLTypes:
+          - CFBundleURLName: com.photodrop.pair
+            CFBundleURLSchemes:
+              - photodrop
         UIBackgroundModes:
           - processing
         BGTaskSchedulerPermittedIdentifiers:
