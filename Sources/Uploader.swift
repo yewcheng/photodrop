@@ -693,8 +693,12 @@ final class Uploader: ObservableObject {
     private func setSent(_ token: UUID, _ sent: Int64?) {
         guard bytesInFlight[token] != nil else { return } // a late update after the file finished
         bytesInFlight[token] = sent
+        // Each change redraws the whole list; unthrottled, that kept the CPU busy enough for iOS to flag it.
+        guard sent == nil || Date().timeIntervalSince(lastBytesPublish) > 0.25 else { return }
+        lastBytesPublish = Date()
         bytesDone = bytesFinished + bytesInFlight.values.reduce(0, +)
     }
+    private var lastBytesPublish = Date.distantPast
 
     private func upload(_ resource: PHAssetResource, name: String, item: Media, base: URL) async throws {
         let file = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
