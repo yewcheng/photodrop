@@ -74,7 +74,6 @@ struct ContentView: View {
 private struct BackupTab: View {
     @AppStorage("serverURL") private var serverURL = ""
     @AppStorage("autoBackup") private var autoBackup = false
-    @AppStorage("coolMode") private var coolMode = false
     @ObservedObject var uploader: Uploader
 
     var body: some View {
@@ -455,6 +454,7 @@ private struct SettingsTab: View {
     @AppStorage("wifiOnly") private var wifiOnly = true
     @AppStorage("hideDeletePrompt") private var hideDeletePrompt = false
     @AppStorage("autoBackup") private var autoBackup = false
+    @AppStorage("coolMode") private var coolMode = false
     @ObservedObject var uploader: Uploader
     @State private var destination = ""
     @State private var destinationMessage: String?
