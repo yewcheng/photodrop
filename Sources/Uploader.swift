@@ -501,7 +501,8 @@ final class Uploader: ObservableObject {
         lastError = nil
         status = "Getting ready…"
         if !resume { (batchDone, batchTotal, bytesDone, bytesTotal, batchStarted) = (0, 0, 0, 0, Date()) }
-        UIApplication.shared.isIdleTimerDisabled = true
+        // Before iOS 26 a locked screen stops sending; after, the screen can sleep and save battery.
+        if #unavailable(iOS 26.0) { UIApplication.shared.isIdleTimerDisabled = true }
         #if compiler(>=6.2)
         if #available(iOS 26.0, *) {
             // Asks iOS to keep sending after the app is left, with its own progress on the Lock Screen and Dynamic Island.
@@ -651,7 +652,8 @@ final class Uploader: ObservableObject {
         }
         // Several files at once, so one being prepared or checksummed never leaves the link (and iOS's progress) idle.
         try await withThrowingTaskGroup(of: Void.self) { group in
-            for _ in 0..<Self.parallelSends {
+            // Cool mode: one at a time, for less heat and battery at the cost of speed.
+            for _ in 0..<(UserDefaults.standard.bool(forKey: "coolMode") ? 1 : Self.parallelSends) {
                 guard let job = nextJob() else { break }
                 group.addTask { try await self.sendOne(job.resource, name: job.name, item: job.item, base: base) }
             }

@@ -74,6 +74,7 @@ struct ContentView: View {
 private struct BackupTab: View {
     @AppStorage("serverURL") private var serverURL = ""
     @AppStorage("autoBackup") private var autoBackup = false
+    @AppStorage("coolMode") private var coolMode = false
     @ObservedObject var uploader: Uploader
 
     var body: some View {
@@ -497,6 +498,7 @@ private struct SettingsTab: View {
                         Text("No limit").tag(Int.max)
                     }
                     Toggle("Only send on Wi-Fi", isOn: $wifiOnly)
+                    Toggle("Cool mode (one file at a time, slower)", isOn: $coolMode)
                     // The Free up phone space buttons on Backup stay either way.
                     Toggle("Offer to delete after sending", isOn: Binding(get: { !hideDeletePrompt }, set: { hideDeletePrompt = !$0 }))
                 }
