@@ -486,9 +486,6 @@ private struct SettingsTab: View {
                          ? "Scan the code from the laptop's pairing page. Works on home Wi-Fi without Tailscale."
                          : "Paired. Everything sent is encrypted, and only this laptop is trusted.")
                 }
-                .sheet(isPresented: $pairing) {
-                    PairSheet { Task { await uploader.refresh() } }
-                }
                 Section {
                     TextField("https://laptop.tailnet.ts.net:5443", text: $serverURL)
                         .keyboardType(.URL)
@@ -542,6 +539,10 @@ private struct SettingsTab: View {
                 }
             }
             .navigationTitle("Settings")
+            // On the Form, not its row: a sheet on a row stopped responding when the row changed after pairing.
+            .sheet(isPresented: $pairing) {
+                PairSheet { Task { await uploader.refresh() } }
+            }
             .onReceive(uploader.$manifest) { manifest in
                 if destination.isEmpty, let saved = manifest?.destination { destination = saved }
             }

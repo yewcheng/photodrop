@@ -58,10 +58,18 @@ enum Pairing {
         request.httpBody = try JSONEncoder().encode(["code": code.filter(\.isNumber), "name": UIDevice.current.name])
         request.timeoutInterval = 15
         let data: Data, response: URLResponse
-        do { (data, response) = try await session.data(for: request) } catch {
-            throw Failure(errorDescription: pin.mismatch
-                ? "This isn't the laptop in the QR code. Pairing stopped for safety."
-                : "Can't reach the laptop. Check both are on the same Wi-Fi. (\(error.localizedDescription))")
+        do {
+            (data, response) = try await session.data(for: request)
+        } catch where !pin.mismatch {
+            // The first connection fails while iOS asks for Local Network access, so try once more after it's answered.
+            try await Task.sleep(nanoseconds: 3_000_000_000)
+            do { (data, response) = try await session.data(for: request) } catch {
+                throw Failure(errorDescription: pin.mismatch
+                    ? "This isn't the laptop in the QR code. Pairing stopped for safety."
+                    : "Can't reach the laptop. Check both are on the same Wi-Fi, and that PhotoDrop is on in Settings → Privacy & Security → Local Network. (\(error.localizedDescription))")
+            }
+        } catch {
+            throw Failure(errorDescription: "This isn't the laptop in the QR code. Pairing stopped for safety.")
         }
         struct Reply: Decodable { let token: String?; let detail: String? }
         let reply = try? JSONDecoder().decode(Reply.self, from: data)
@@ -210,7 +218,8 @@ private struct QRScanner: UIViewControllerRepresentable {
 
         func dataScanner(_ scanner: DataScannerViewController, didAdd items: [RecognizedItem], allItems: [RecognizedItem]) {
             for case let .barcode(code) in items {
-                if let value = code.payloadStringValue { onFound(value); return }
+                // One read only: the code works once, and repeat reads paired the phone twice.
+                if let value = code.payloadStringValue { scanner.stopScanning(); onFound(value); return }
             }
         }
     }
