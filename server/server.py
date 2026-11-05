@@ -1,4 +1,4 @@
-"""Receives original photo/video files from the PhotoDrop iPhone app.
+﻿"""Receives original photo/video files from the PhotoDrop iPhone app.
 
 Two stages, like Copy-iPhonePhotos v5: phone -> laptop holding folder -> home
 desktop share. A holding copy is deleted only after the copy on the share has
@@ -270,7 +270,7 @@ def wifi_name() -> str:
 def ago(t: float) -> str:
     seconds = time.time() - t
     if seconds < 60:
-        return "<b style=color:green>● connected now</b>"
+        return "<b class=on>â— Connected now</b>"
     for size, unit in ((86400, "day"), (3600, "hour"), (60, "minute")):
         if seconds >= size:
             n = int(seconds // size)
@@ -287,28 +287,69 @@ def pair_page(request: Request) -> str:
     link = f"photodrop://pair?u={address}&c={pairing['code']}&f={ensure_cert()}"
     with db() as conn:
         devices = conn.execute("SELECT token_hash, name, paired_at, last_seen FROM devices ORDER BY paired_at").fetchall()
-    rows = "".join(
-        f"<li>{html.escape(d['name'])} · paired {time.strftime('%d %b %Y', time.localtime(d['paired_at']))} · {ago(d['last_seen'])} "
-        f"<form method=post action='/unpair?token_hash={d['token_hash']}' style=display:inline><button>Unpair</button></form></li>"
+        waiting = conn.execute("SELECT COUNT(*), COALESCE(SUM(size), 0) FROM files WHERE state='holding'").fetchone()
+    phones = "".join(
+        f"<div class=phone><div><b>{html.escape(d['name'])}</b><span>{ago(d['last_seen'])} Â· paired "
+        f"{time.strftime('%d %b %Y', time.localtime(d['paired_at']))}</span></div>"
+        f"<form method=post action='/unpair?token_hash={d['token_hash']}'><button class=quiet>Unpair</button></form></div>"
         for d in devices
-    ) or "<li>None yet</li>"
-    return f"""<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width"><meta http-equiv=refresh content=10><title>PhotoDrop</title>
-<style>body{{font-family:system-ui;max-width:32rem;margin:2rem auto;padding:0 1rem}}.code{{font-size:2.5rem;letter-spacing:.3rem;font-weight:600}}</style>
-<h1>PhotoDrop on this laptop</h1>
-<p>Wi-Fi: <b>{html.escape(wifi_name())}</b> · address {lan_ip()}<br>
-<small>Phones must be on this same Wi-Fi to pair and send without Tailscale. Updates every 10 seconds.</small></p>
+    ) or "<p class=muted>No phones yet. Scan the code to pair one.</p>"
+    reachable = os.path.isdir(DEST)
+    return f"""<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width"><meta http-equiv=refresh content=10>
+<title>PhotoDrop</title>
+<style>
+:root{{--bg:#f4f5f7;--card:#fff;--text:#1d1d1f;--muted:#6e6e73;--line:#e5e5ea;--accent:#0a84ff;--ok:#1f9d55;--warn:#c27c0e}}
+@media (prefers-color-scheme:dark){{:root{{--bg:#111214;--card:#1c1c1f;--text:#f2f2f7;--muted:#98989f;--line:#2c2c30;--accent:#409cff;--ok:#30d158;--warn:#ffb340}}}}
+*{{box-sizing:border-box}}
+body{{margin:0;background:var(--bg);color:var(--text);font:15px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif}}
+header{{display:flex;justify-content:space-between;align-items:center;gap:1rem;flex-wrap:wrap;max-width:1100px;margin:0 auto;padding:1.5rem 1.5rem .5rem}}
+h1{{font-size:1.5rem;margin:0}} h2{{font-size:1rem;margin:0 0 .75rem}}
+.pill{{background:var(--card);border:1px solid var(--line);border-radius:999px;padding:.35rem .9rem;color:var(--muted)}}
+.pill b{{color:var(--text)}}
+main{{display:grid;grid-template-columns:minmax(300px,380px) 1fr;gap:1.25rem;max-width:1100px;margin:0 auto;padding:1rem 1.5rem 2rem}}
+@media (max-width:760px){{main{{grid-template-columns:1fr}}}}
+.card{{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:1.25rem 1.4rem}}
+.stack{{display:grid;gap:1.25rem;align-content:start}}
+.qr{{background:#fff;border-radius:12px;padding:.75rem;display:flex;justify-content:center}}
+.qr svg{{width:100%;height:auto;max-width:300px}}
+.code{{font:600 2.2rem/1.2 ui-monospace,Consolas,monospace;letter-spacing:.35rem;text-align:center;margin:.75rem 0 .25rem}}
+.muted,span{{color:var(--muted)}} small{{color:var(--muted)}}
+.addr{{text-align:center;font-family:ui-monospace,Consolas,monospace}}
+.phone{{display:flex;justify-content:space-between;align-items:center;gap:1rem;padding:.6rem 0;border-top:1px solid var(--line)}}
+.phone:first-of-type{{border-top:0}} .phone span,.folder span{{display:block;font-size:.88rem}}
+.on{{color:var(--ok);font-weight:600}}
+.folder{{display:flex;justify-content:space-between;align-items:center;gap:1rem;padding:.75rem 0;border-top:1px solid var(--line)}}
+.folder:first-of-type{{border-top:0}} .folder div{{min-width:0}}
+code{{display:block;overflow-wrap:anywhere;font-size:.88rem;margin-top:.15rem}}
+.warn{{color:var(--warn);font-size:.88rem}}
+button{{font:inherit;border:0;border-radius:10px;padding:.5rem 1rem;background:var(--accent);color:#fff;cursor:pointer;white-space:nowrap}}
+button.quiet{{background:transparent;color:var(--muted);border:1px solid var(--line)}}
+form{{margin:0}}
+</style>
+<header><h1>PhotoDrop</h1>
+<div class=pill>Wi-Fi <b>{html.escape(wifi_name())}</b> Â· {lan_ip()}</div></header>
+<main>
+<section class=card>
 <h2>Pair a phone</h2>
-<p>On the phone, open PhotoDrop → Settings → Pair with laptop and scan this. The phone must be on the same Wi-Fi.</p>
-{segno.make(link, error="m").svg_inline(scale=6)}
-<p>Or type the address and code:</p><p><b>{address}</b></p><p class=code>{pairing['code']}</p>
-<p>The code works once. A new one appears after it's used or after 5 minutes.</p>
-<h2>Paired phones</h2><ul>{rows}</ul>
-<h2>Folders</h2>
-<p><b>Final folder</b>, where photos end up:<br><code>{html.escape(str(DEST))}</code>
-{"" if os.path.isdir(DEST) else "<br><i>Not reachable right now. Files wait until it is.</i>"}</p>
-<form method=post action="/choose?which=final"><button>Choose…</button></form>
-<p><b>Waiting folder</b>, where files sit until the final folder is reachable:<br><code>{html.escape(str(HOLDING))}</code></p>
-<form method=post action="/choose?which=waiting"><button>Choose…</button></form>"""
+<p class=muted>On the phone: PhotoDrop â†’ Settings â†’ Pair with laptop. It must be on the same Wi-Fi.</p>
+<div class=qr>{segno.make(link, error="m").svg_inline(scale=6)}</div>
+<div class=code>{pairing['code']}</div>
+<div class=addr>{address}</div>
+<p><small>Or type the address and code. Each code works once; a new one appears after it's used or after 5 minutes.</small></p>
+</section>
+<div class=stack>
+<section class=card><h2>Phones</h2>{phones}</section>
+<section class=card><h2>Folders</h2>
+<div class=folder><div><b>Final folder</b><span>Where photos end up</span><code>{html.escape(str(DEST))}</code>
+{"" if reachable else "<div class=warn>Not reachable right now. Files wait on this laptop until it is.</div>"}</div>
+<form method=post action="/choose?which=final"><button>Chooseâ€¦</button></form></div>
+<div class=folder><div><b>Waiting folder</b><span>{waiting[0]} file{"" if waiting[0] == 1 else "s"} waiting Â· {waiting[1] / 1024**3:.1f} GB</span>
+<code>{html.escape(str(HOLDING))}</code></div>
+<form method=post action="/choose?which=waiting"><button class=quiet>Chooseâ€¦</button></form></div>
+</section>
+<p><small>Updates every 10 seconds. This page only opens on this laptop.</small></p>
+</div>
+</main>"""
 
 
 def pick_folder(title: str, start: Path) -> str:
