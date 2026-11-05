@@ -26,7 +26,7 @@ jobs:
       - name: Test the receiver
         run: |
           python3 -m venv .venv
-          .venv/bin/pip install -q fastapi uvicorn
+          .venv/bin/pip install -q fastapi uvicorn segno cryptography
           .venv/bin/python server/test_server.py
 
       - name: Generate Xcode project
