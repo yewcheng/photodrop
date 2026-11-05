@@ -14,6 +14,7 @@ import hmac
 import html
 import secrets
 import socket
+import subprocess
 import logging
 import os
 import re
@@ -257,26 +258,50 @@ def lan_ip() -> str:
         return s.getsockname()[0]
 
 
+def wifi_name() -> str:
+    try:
+        out = subprocess.run(["netsh", "wlan", "show", "interfaces"], capture_output=True, text=True, timeout=5,
+                             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)).stdout
+        return next(line.split(":", 1)[1].strip() for line in out.splitlines() if line.strip().startswith("SSID"))
+    except (OSError, StopIteration, subprocess.SubprocessError):
+        return "not on Wi-Fi (cable or unknown)"
+
+
+def ago(t: float) -> str:
+    seconds = time.time() - t
+    if seconds < 60:
+        return "<b style=color:green>● connected now</b>"
+    for size, unit in ((86400, "day"), (3600, "hour"), (60, "minute")):
+        if seconds >= size:
+            n = int(seconds // size)
+            return f"last seen {n} {unit}{'s' if n > 1 else ''} ago"
+
+
 @app.get("/pair", response_class=HTMLResponse)
 def pair_page(request: Request) -> str:
     check_local(request)
-    pairing.update(code=f"{secrets.randbelow(10**6):06d}", expires=time.time() + PAIR_SECONDS, tries=0)
+    # The page refreshes itself, so keep a live code instead of replacing it mid-scan.
+    if not pairing.get("code") or time.time() > pairing["expires"] - 30:
+        pairing.update(code=f"{secrets.randbelow(10**6):06d}", expires=time.time() + PAIR_SECONDS, tries=0)
     address = f"https://{lan_ip()}:{LAN_PORT}"
     link = f"photodrop://pair?u={address}&c={pairing['code']}&f={ensure_cert()}"
     with db() as conn:
-        devices = conn.execute("SELECT token_hash, name, paired_at FROM devices ORDER BY paired_at").fetchall()
+        devices = conn.execute("SELECT token_hash, name, paired_at, last_seen FROM devices ORDER BY paired_at").fetchall()
     rows = "".join(
-        f"<li>{html.escape(d['name'])} · paired {time.strftime('%d %b %Y', time.localtime(d['paired_at']))} "
+        f"<li>{html.escape(d['name'])} · paired {time.strftime('%d %b %Y', time.localtime(d['paired_at']))} · {ago(d['last_seen'])} "
         f"<form method=post action='/unpair?token_hash={d['token_hash']}' style=display:inline><button>Unpair</button></form></li>"
         for d in devices
     ) or "<li>None yet</li>"
-    return f"""<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width"><title>Pair a phone</title>
+    return f"""<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width"><meta http-equiv=refresh content=10><title>PhotoDrop</title>
 <style>body{{font-family:system-ui;max-width:32rem;margin:2rem auto;padding:0 1rem}}.code{{font-size:2.5rem;letter-spacing:.3rem;font-weight:600}}</style>
-<h1>Pair a phone with PhotoDrop</h1>
+<h1>PhotoDrop on this laptop</h1>
+<p>Wi-Fi: <b>{html.escape(wifi_name())}</b> · address {lan_ip()}<br>
+<small>Phones must be on this same Wi-Fi to pair and send without Tailscale. Updates every 10 seconds.</small></p>
+<h2>Pair a phone</h2>
 <p>On the phone, open PhotoDrop → Settings → Pair with laptop and scan this. The phone must be on the same Wi-Fi.</p>
 {segno.make(link, error="m").svg_inline(scale=6)}
 <p>Or type the address and code:</p><p><b>{address}</b></p><p class=code>{pairing['code']}</p>
-<p>The code works once and expires in 5 minutes. Reload this page for a new one.</p>
+<p>The code works once. A new one appears after it's used or after 5 minutes.</p>
 <h2>Paired phones</h2><ul>{rows}</ul>
 <h2>Folders</h2>
 <p><b>Final folder</b>, where photos end up:<br><code>{html.escape(str(DEST))}</code>
