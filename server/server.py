@@ -31,7 +31,8 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 
 ROOT = Path(os.environ.get("PHOTODROP_ROOT", Path.home() / "PhotoDrop"))
-HOLDING = ROOT / "holding"
+# Where files wait until the final folder is reachable; chosen on the settings page.
+HOLDING = Path((ROOT / "holding.txt").read_text().strip()) if (ROOT / "holding.txt").exists() else ROOT / "holding"
 DB_PATH = ROOT / "photodrop.db"
 ALLOWED_USER = (ROOT / "allowed_user.txt").read_text().strip()
 DEST = Path((ROOT / "destination.txt").read_text().strip())
@@ -276,7 +277,46 @@ def pair_page(request: Request) -> str:
 {segno.make(link, error="m").svg_inline(scale=6)}
 <p>Or type the address and code:</p><p><b>{address}</b></p><p class=code>{pairing['code']}</p>
 <p>The code works once and expires in 5 minutes. Reload this page for a new one.</p>
-<h2>Paired phones</h2><ul>{rows}</ul>"""
+<h2>Paired phones</h2><ul>{rows}</ul>
+<h2>Folders</h2>
+<p><b>Final folder</b>, where photos end up:<br><code>{html.escape(str(DEST))}</code>
+{"" if os.path.isdir(DEST) else "<br><i>Not reachable right now. Files wait until it is.</i>"}</p>
+<form method=post action="/choose?which=final"><button>Choose…</button></form>
+<p><b>Waiting folder</b>, where files sit until the final folder is reachable:<br><code>{html.escape(str(HOLDING))}</code></p>
+<form method=post action="/choose?which=waiting"><button>Choose…</button></form>"""
+
+
+def pick_folder(title: str, start: Path) -> str:
+    """The standard Windows folder picker, shown on the laptop's screen."""
+    import tkinter
+    from tkinter import filedialog
+
+    root = tkinter.Tk()
+    root.withdraw()
+    root.attributes("-topmost", True)  # the receiver has no window, so the picker would open behind the browser
+    try:
+        return filedialog.askdirectory(parent=root, title=title, initialdir=start if start.exists() else Path.home())
+    finally:
+        root.destroy()
+
+
+@app.post("/choose")
+def choose(request: Request, which: str) -> RedirectResponse:
+    global HOLDING
+    check_local(request)
+    if which == "final":
+        picked = pick_folder("Where should PhotoDrop put your photos?", DEST)
+        if picked:
+            apply_destination(str(Path(picked)))
+    elif which == "waiting":
+        picked = pick_folder("Where should files wait until the final folder is reachable?", HOLDING)
+        if picked:
+            new = Path(picked)
+            new.mkdir(parents=True, exist_ok=True)
+            # Files already waiting keep their saved paths and still move; only new ones go here.
+            (ROOT / "holding.txt").write_text(str(new))
+            HOLDING = new
+    return RedirectResponse("/pair", 303)
 
 
 @app.post("/pair")
@@ -371,8 +411,12 @@ def history(request: Request, limit: int = 300) -> list[dict]:
 
 @app.post("/destination")
 def set_destination(request: Request, path: str) -> dict:
-    global DEST
     check_user(request)
+    return apply_destination(path)
+
+
+def apply_destination(path: str) -> dict:
+    global DEST
     new = Path(path.strip())
     if not new.is_absolute() or ".." in new.parts:
         raise HTTPException(400, "needs a full path")
@@ -391,7 +435,7 @@ async def put_file(request: Request, name: str, month: str, sha256: str, mtime: 
     check_user(request)
     if not NAME_RE.match(name) or ".." in name or name.endswith(".part") or not MONTH_RE.match(month):
         raise HTTPException(400, "bad name or month")
-    if shutil.disk_usage(ROOT).free < MIN_FREE_BYTES:
+    if shutil.disk_usage(HOLDING).free < MIN_FREE_BYTES:
         raise HTTPException(507, "laptop disk nearly full")
 
     folder = HOLDING / f"{month}_a"

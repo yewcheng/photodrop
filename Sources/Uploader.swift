@@ -417,26 +417,6 @@ final class Uploader: ObservableObject {
         }
     }
 
-    /// Returns an error message, or nil when the laptop accepted the folder.
-    func setDestination(_ path: String) async -> String? {
-        guard let base = baseURL else { return "Add the laptop address first." }
-        var components = URLComponents(url: base.appendingPathComponent("destination"), resolvingAgainstBaseURL: false)!
-        components.queryItems = [URLQueryItem(name: "path", value: path)]
-        components.percentEncodedQuery = components.percentEncodedQuery?.replacingOccurrences(of: "+", with: "%2B")
-        var request = URLRequest(url: components.url!)
-        request.httpMethod = "POST"
-        do {
-            let (_, response) = try await session.data(for: request)
-            let code = (response as? HTTPURLResponse)?.statusCode ?? 0
-            if code == 400 { return "That isn't a full folder path. It should look like \\\\192.168.10.6\\d\\Photos or D:\\Photos." }
-            try Self.check(response)
-            await refresh()
-            return nil
-        } catch {
-            return error.localizedDescription
-        }
-    }
-
     // MARK: Automatic backup
 
     /// Why an automatic backup can't start right now; empty means it can.

@@ -462,8 +462,6 @@ private struct SettingsTab: View {
     @AppStorage("autoBackup") private var autoBackup = false
     @AppStorage("coolMode") private var coolMode = false
     @ObservedObject var uploader: Uploader
-    @State private var destination = ""
-    @State private var destinationMessage: String?
     @State private var pairing = false
     @AppStorage("pinnedCert") private var pinnedCert = ""
 
@@ -498,20 +496,13 @@ private struct SettingsTab: View {
                     Text(uploader.manifest == nil ? "Not connected" : "Connected")
                 }
                 Section {
-                    TextField("D:\\Photos", text: $destination)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-                    Button("Save folder") {
-                        Task {
-                            let error = await uploader.setDestination(destination)
-                            destinationMessage = error ?? "Saved. The laptop will re-check what's in this folder."
-                        }
-                    }
-                    .disabled(uploader.manifest == nil || destination.isEmpty || destination == uploader.manifest?.destination)
+                    Text(uploader.manifest?.destination ?? "Not connected")
+                        .font(.callout)
+                        .textSelection(.enabled)
                 } header: {
-                    Text("Desktop folder")
+                    Text("Photos go to")
                 } footer: {
-                    Text(destinationMessage ?? "Year and month folders are created inside this one, reusing any that exist.")
+                    Text("To change it, open PhotoDrop's page on the laptop (http://127.0.0.1:8860/pair) and choose a folder there.")
                 }
                 Section("Sending") {
                     Picker("Most files per batch", selection: $batchLimit) {
@@ -542,9 +533,6 @@ private struct SettingsTab: View {
             // On the Form, not its row: a sheet on a row stopped responding when the row changed after pairing.
             .sheet(isPresented: $pairing) {
                 PairSheet { Task { await uploader.refresh() } }
-            }
-            .onReceive(uploader.$manifest) { manifest in
-                if destination.isEmpty, let saved = manifest?.destination { destination = saved }
             }
         }
     }
