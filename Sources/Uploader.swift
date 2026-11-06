@@ -284,8 +284,14 @@ final class Uploader: ObservableObject {
     // MARK: Deleting from the phone
 
     func deleteFromPhone(photos: Bool, videos: Bool) async {
+        await deleteFromPhone(ids: Set((photos ? deletablePhotos : []) + (videos ? deletableVideos : [])))
+    }
+
+    /// Checksum-confirmed on the desktop, so safe to offer for deletion.
+    var backedUp: Set<String> { Set(deletablePhotos).union(deletableVideos) }
+
+    func deleteFromPhone(ids: Set<String>) async {
         guard let base = baseURL else { return }
-        let ids = Set((photos ? deletablePhotos : []) + (videos ? deletableVideos : []))
         let items = media.filter { ids.contains($0.id) }
         do {
             // Ask again right now: the database says it was verified, this says it's still there.

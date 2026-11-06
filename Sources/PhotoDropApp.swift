@@ -43,6 +43,8 @@ struct ContentView: View {
                 .tabItem { Label("Backup", systemImage: "arrow.up.circle") }
             LibraryTab(uploader: uploader)
                 .tabItem { Label("Library", systemImage: "photo.on.rectangle") }
+            CleanupTab(uploader: uploader)
+                .tabItem { Label("Clean up", systemImage: "sparkles") }
             HistoryTab(uploader: uploader)
                 .tabItem { Label("History", systemImage: "clock") }
             SettingsTab(uploader: uploader)
@@ -636,7 +638,7 @@ private struct MonthView: View {
     }
 }
 
-private struct Thumbnail: View {
+struct Thumbnail: View {
     let id: String
     let side: CGFloat
     @State private var image: UIImage?
