@@ -1,3 +1,4 @@
+import AVKit
 import Photos
 import SwiftUI
 import Vision
@@ -165,7 +166,7 @@ struct CleanupTab: View {
                 }
                 if cleanup.scanned {
                     Section("Suggestions") {
-                        link("Similar photos", "Keeps the favourite or sharpest of each set", groups: cleanup.similar, grouped: true)
+                        link("Similar photos", "Best of each set is labelled", groups: cleanup.similar, grouped: true)
                         link("Screenshots over a month old", nil, groups: [cleanup.screenshots], grouped: false)
                         link("Videos under 2 seconds", "Usually accidental", groups: [cleanup.shortVideos], grouped: false)
                         link("Unpicked burst photos", "The burst's chosen photo stays", groups: [cleanup.burstExtras], grouped: false)
@@ -199,10 +200,14 @@ private struct PickView: View {
     @ObservedObject var uploader: Uploader
     let title: String
     let groups: [[String]]
-    /// Grouped: the first of each group is kept and the rest preselected. Otherwise everything is preselected.
+    /// Grouped: the first of each group is the suggested keeper.
     let grouped: Bool
+    /// Nothing is marked until you mark it.
     @State private var chosen: Set<String> = []
+    @State private var viewing: Viewing?
     @State private var confirming = false
+
+    private struct Viewing: Identifiable { let id: String }
 
     var body: some View {
         ScrollView {
@@ -211,10 +216,16 @@ private struct PickView: View {
                     LazyVGrid(columns: [GridItem(.adaptive(minimum: 100), spacing: 2)], spacing: 2) {
                         ForEach(groups[index], id: \.self) { id in
                             Thumbnail(id: id, side: 300)
-                                .overlay(alignment: .topTrailing) { badge(id, keeper: grouped && id == groups[index].first) }
-                                .opacity(chosen.contains(id) ? 0.6 : 1)
-                                .onTapGesture { if chosen.remove(id) == nil { chosen.insert(id) } }
-                                .accessibilityAddTraits(chosen.contains(id) ? [.isButton, .isSelected] : .isButton)
+                                .opacity(chosen.contains(id) ? 0.5 : 1)
+                                .overlay(alignment: .topTrailing) { MarkButton(id: id, chosen: $chosen) }
+                                .overlay(alignment: .bottomLeading) {
+                                    if grouped && id == groups[index].first {
+                                        Text("Best").font(.caption2.bold()).padding(.horizontal, 6).padding(.vertical, 2)
+                                            .background(.ultraThinMaterial, in: Capsule()).padding(4)
+                                    }
+                                }
+                                .onTapGesture { viewing = Viewing(id: id) }
+                                .accessibilityAddTraits(.isButton)
                         }
                     }
                     if grouped { Divider() }
@@ -223,10 +234,16 @@ private struct PickView: View {
         }
         .navigationTitle(title)
         .navigationBarTitleDisplayMode(.inline)
-        .onAppear { chosen = Set(grouped ? groups.flatMap { $0.dropFirst() } : groups.flatMap { $0 }) }
+        .safeAreaInset(edge: .top) {
+            Text("Tap to view. Tap the circle to mark for deletion.")
+                .font(.caption).foregroundStyle(.secondary).frame(maxWidth: .infinity).padding(6).background(.bar)
+        }
         .toolbar {
             Button("Delete \(chosen.count)", role: .destructive) { confirming = true }
                 .disabled(chosen.isEmpty)
+        }
+        .fullScreenCover(item: $viewing) { start in
+            MediaViewer(ids: groups.flatMap { $0 }, current: start.id, chosen: $chosen)
         }
         .confirmationDialog("Delete \(chosen.count) items from this phone?", isPresented: $confirming, titleVisibility: .visible) {
             Button("Delete \(chosen.count)", role: .destructive) {
@@ -238,22 +255,104 @@ private struct PickView: View {
                 }
             }
         } message: {
-            Text("Tap a picture to keep or delete it. Only items confirmed by checksum on the desktop are shown. They go to Recently Deleted for 30 days. With iCloud Photos on, this also removes them from iCloud.")
+            Text("Only items confirmed by checksum on the desktop are shown. They go to Recently Deleted for 30 days. With iCloud Photos on, this also removes them from iCloud.")
         }
     }
+}
 
-    @ViewBuilder private func badge(_ id: String, keeper: Bool) -> some View {
-        Group {
-            if chosen.contains(id) {
-                Image(systemName: "trash.circle.fill").foregroundStyle(.red)
-            } else if keeper {
-                Text("Keep").font(.caption2.bold()).padding(.horizontal, 4)
-            } else {
-                Image(systemName: "checkmark.circle").foregroundStyle(.green)
+private struct MarkButton: View {
+    let id: String
+    @Binding var chosen: Set<String>
+
+    var body: some View {
+        let marked = chosen.contains(id)
+        Button {
+            if chosen.remove(id) == nil { chosen.insert(id) }
+        } label: {
+            Image(systemName: marked ? "trash.circle.fill" : "circle")
+                .font(.title3)
+                .foregroundStyle(marked ? Color.red : Color.white)
+                .shadow(radius: 2)
+                .padding(6)
+        }
+        .accessibilityLabel(marked ? "Marked for deletion" : "Mark for deletion")
+    }
+}
+
+/// Full-screen swipe-through view, with the same mark button.
+private struct MediaViewer: View {
+    let ids: [String]
+    @State var current: String
+    @Binding var chosen: Set<String>
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        let marked = chosen.contains(current)
+        NavigationStack {
+            TabView(selection: $current) {
+                ForEach(ids, id: \.self) { id in
+                    FullMedia(id: id).tag(id)
+                }
+            }
+            .tabViewStyle(.page(indexDisplayMode: .never))
+            .background(Color.black)
+            .navigationTitle("\((ids.firstIndex(of: current) ?? 0) + 1) of \(ids.count)")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) { Button("Done") { dismiss() } }
+            }
+            .safeAreaInset(edge: .bottom) {
+                Button {
+                    if chosen.remove(current) == nil { chosen.insert(current) }
+                } label: {
+                    Label(marked ? "Marked for deletion: tap to keep" : "Mark for deletion", systemImage: marked ? "trash.fill" : "trash")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(marked ? .red : .gray)
+                .padding()
             }
         }
-        .padding(4)
-        .background(.ultraThinMaterial, in: Capsule())
-        .padding(4)
+        .preferredColorScheme(.dark)
+    }
+}
+
+/// A photo at screen size, or a playable video.
+private struct FullMedia: View {
+    let id: String
+    @State private var image: UIImage?
+    @State private var player: AVPlayer?
+
+    var body: some View {
+        ZStack {
+            if let player {
+                VideoPlayer(player: player)
+            } else if let image {
+                Image(uiImage: image).resizable().scaledToFit()
+            } else {
+                ProgressView()
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .task(id: id) {
+            guard let asset = PHAsset.fetchAssets(withLocalIdentifiers: [id], options: nil).firstObject else { return }
+            if asset.mediaType == .video {
+                let options = PHVideoRequestOptions()
+                options.isNetworkAccessAllowed = true
+                PHImageManager.default().requestPlayerItem(forVideo: asset, options: options) { item, _ in
+                    guard let item else { return }
+                    Task { @MainActor in player = AVPlayer(playerItem: item) }
+                }
+            } else {
+                let options = PHImageRequestOptions()
+                options.deliveryMode = .opportunistic
+                options.isNetworkAccessAllowed = true
+                let side = UIScreen.main.bounds.height * UIScreen.main.scale
+                PHImageManager.default().requestImage(for: asset, targetSize: CGSize(width: side, height: side), contentMode: .aspectFit, options: options) { result, _ in
+                    if let result { image = result }
+                }
+            }
+        }
+        .onDisappear { player?.pause() }
     }
 }
