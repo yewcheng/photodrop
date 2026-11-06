@@ -343,8 +343,10 @@ final class Uploader: ObservableObject {
             var batch: [[String: String]] = []
             var batchBytes: Int64 = 0
             do {
+                Diag.note("confirm: start \(items.count) items")
                 for (index, item) in items.enumerated() {
                     try Task.checkCancellation()
+                    if index % 100 == 0 { Diag.note("confirm: item \(index), \(confirmed) confirmed") }
                     confirmStatus = "Checking \(index + 1) of \(items.count) · \(confirmed) confirmed"
                     guard let asset = PHAsset.fetchAssets(withLocalIdentifiers: [item.id], options: nil).firstObject else { continue }
                     let resources = PHAssetResource.assetResources(for: asset).filter { Self.wanted.contains($0.type) }
@@ -375,6 +377,7 @@ final class Uploader: ObservableObject {
             }
             if different > 0 { confirmStatus! += " · \(different) differ from the desktop copy and stay on the phone" }
             if skipped > 0 { confirmStatus! += " · \(skipped) only in iCloud, skipped" }
+            Diag.note("confirm: ended: \(confirmStatus ?? "")")
             confirming = false
             await refresh()
         }
@@ -397,15 +400,26 @@ final class Uploader: ObservableObject {
         return reply
     }
 
-    private final class Hasher: @unchecked Sendable { var sha = SHA256() }
+    private final class Hasher: @unchecked Sendable {
+        var sha = SHA256()
+        var requestID: PHAssetResourceDataRequestID = 0
+    }
 
     /// Streams the original from the library through SHA-256, with no copy on disk: the phone may be nearly full.
     private nonisolated static func libraryChecksum(_ resource: PHAssetResource) async throws -> String {
         let hasher = Hasher()
         let options = PHAssetResourceRequestOptions()
         options.isNetworkAccessAllowed = false
+        let manager = PHAssetResourceManager.default()
+        // iOS sometimes never answers for an item it can't read; cancelling makes it report an error so the check moves on.
+        let watchdog = Task {
+            try await Task.sleep(nanoseconds: 60_000_000_000)
+            Diag.note("confirm: gave up waiting on \(resource.originalFilename)")
+            manager.cancelDataRequest(hasher.requestID)
+        }
+        defer { watchdog.cancel() }
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            PHAssetResourceManager.default().requestData(for: resource, options: options) { chunk in
+            hasher.requestID = manager.requestData(for: resource, options: options) { chunk in
                 hasher.sha.update(data: chunk)
             } completionHandler: { error in
                 if let error { continuation.resume(throwing: error) } else { continuation.resume() }
