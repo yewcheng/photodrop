@@ -159,7 +159,7 @@ struct CleanupTab: View {
             List {
                 Section {
                     Button(cleanup.running ? "Looking…" : cleanup.scanned ? "Look again" : "Look for clutter") { cleanup.scan(uploader) }
-                        .disabled(cleanup.running || uploader.backedUp.isEmpty)
+                        .disabled(cleanup.running || (uploader.deletablePhotos.isEmpty && uploader.deletableVideos.isEmpty))
                     if let status = cleanup.status { Text(status).foregroundStyle(.secondary) }
                 } footer: {
                     Text("Only photos and videos already confirmed on the desktop are suggested, and you choose what goes. Comparing similar photos runs while the phone is charging.")

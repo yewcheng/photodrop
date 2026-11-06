@@ -294,6 +294,7 @@ final class Uploader: ObservableObject {
         guard let base = baseURL else { return }
         let items = media.filter { ids.contains($0.id) }
         do {
+            Diag.note("delete: asking laptop about \(items.count) items")
             // Ask again right now: the database says it was verified, this says it's still there.
             var request = URLRequest(url: base.appendingPathComponent("still-there"))
             request.httpMethod = "POST"
@@ -306,8 +307,10 @@ final class Uploader: ObservableObject {
                 deleteMessage = "Nothing deleted: the desktop must be reachable so its copies can be confirmed."
                 return
             }
+            Diag.note("delete: laptop confirmed \(safe.count), asking iOS")
             let assets = PHAsset.fetchAssets(withLocalIdentifiers: safe, options: nil)
             try await PHPhotoLibrary.shared().performChanges { PHAssetChangeRequest.deleteAssets(assets) }
+            Diag.note("delete: iOS finished")
             let kept = items.count - safe.count
             deleteMessage = "Moved \(safe.count) to Recently Deleted." + (kept > 0 ? " Kept \(kept) not confirmed on the desktop." : "")
             await loadLibrary()
@@ -328,7 +331,8 @@ final class Uploader: ObservableObject {
     private var unconfirmed: [Media] {
         media.filter { state(of: $0) == .desktop && !$0.keys.allSatisfy { $0.map(verifiedKeys.contains) == true } }
     }
-    var unconfirmedCount: Int { unconfirmed.count }
+    /// Every fully checksum-confirmed item counts as on the desktop, so the rest of that count is unconfirmed.
+    var unconfirmedCount: Int { max(0, (counts[.desktop] ?? 0) - deletablePhotos.count - deletableVideos.count) }
 
     func confirmArchive() {
         guard !confirming, !running, let base = baseURL else { return }
