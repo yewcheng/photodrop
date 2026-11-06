@@ -478,6 +478,16 @@ def media(request: Request, key: str) -> FileResponse:
     return FileResponse(path, filename=row["name"], content_disposition_type="inline")
 
 
+@app.post("/diag")
+async def diag(request: Request) -> dict:
+    """The phone's own notes from a run that ended without a crash report."""
+    check_user(request)
+    body = (await request.body())[:65536].decode("utf-8", "replace")
+    with open(ROOT / "phone-diag.log", "a", encoding="utf-8") as f:
+        f.write(f"--- received {time.strftime('%Y-%m-%d %H:%M:%S')}\n{body}\n")
+    return {}
+
+
 @app.get("/history")
 def history(request: Request, limit: int = 300) -> list[dict]:
     check_user(request)

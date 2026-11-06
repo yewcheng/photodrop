@@ -389,6 +389,11 @@ final class Uploader: ObservableObject {
             moveTotal = latest.holding.isEmpty ? 0 : max(moveTotal, latest.holding.count)
             verifiedKeys = Set(latest.verified)
             updateCounts()
+            if let notes = Diag.takePrevious() {
+                var request = URLRequest(url: base.appendingPathComponent("diag"))
+                request.httpMethod = "POST"
+                _ = try? await session.upload(for: request, from: notes)
+            }
             if !running { lastError = nil }
         } catch is CancellationError {
             return
@@ -486,6 +491,7 @@ final class Uploader: ObservableObject {
     func start(ids: Set<String>, resume: Bool = false) {
         guard !running, let base = baseURL else { return }
         running = true
+        Diag.note("start \(ids.count) items resume=\(resume) cool=\(UserDefaults.standard.bool(forKey: "coolMode"))")
         lastError = nil
         status = "Getting ready…"
         if !resume { (batchDone, batchTotal, bytesDone, bytesTotal, batchStarted) = (0, 0, 0, 0, Date()) }
@@ -497,15 +503,18 @@ final class Uploader: ObservableObject {
             // Registered per send: iOS throws an uncatchable exception if the exact ID has no handler.
             let id = "\(Self.sendTaskId).\(UUID().uuidString)"
             let registered = BGTaskScheduler.shared.register(forTaskWithIdentifier: id, using: nil) { task in
+                Diag.note("continued task launched: \(type(of: task))")
                 Task { @MainActor in Uploader.shared.attachContinued(task as! BGContinuedProcessingTask) }
             }
             let request = BGContinuedProcessingTaskRequest(identifier: id, title: "Sending to laptop", subtitle: "Getting ready…")
             request.strategy = .fail
             continuedIds = ids
             backgroundNote = "Waiting for iOS to accept background sending…"
+            Diag.note("register \(registered)")
             if !registered {
                 backgroundNote = "iOS wouldn't register background sending, so keep PhotoDrop open (app ID \(Bundle.main.bundleIdentifier ?? "?"))."
-            } else { do { try BGTaskScheduler.shared.submit(request) } catch {
+            } else { do { try BGTaskScheduler.shared.submit(request); Diag.note("submitted") } catch {
+                Diag.note("submit failed \(error)")
                 backgroundNote = "iOS refused background sending, so keep PhotoDrop open: \(error.localizedDescription) (\((error as NSError).code), app ID \(Bundle.main.bundleIdentifier ?? "?"))"
             } }
         }
@@ -513,6 +522,7 @@ final class Uploader: ObservableObject {
         // Fallback before iOS 26: iOS allows about 30 seconds after leaving the app, then suspends it; this asks for that time.
         var grace = UIBackgroundTaskIdentifier.invalid
         grace = UIApplication.shared.beginBackgroundTask {
+            Diag.note("grace expired")
             Task { @MainActor in
                 // With iOS 26's background send running, this short grace ending must not stop it.
                 if Uploader.shared.continuedTask == nil {
@@ -531,8 +541,10 @@ final class Uploader: ObservableObject {
                 try await run(base: base, ids: ids, limit: limit, resume: resume)
                 status = failed.isEmpty ? "Batch finished" : "Batch finished with \(failed.count) failed"
             } catch is CancellationError {
+                Diag.note("cancelled")
                 status = interruptedIds == nil ? "Stopped. Nothing is lost: send again to continue." : "Paused while PhotoDrop was in the background. It continues when you come back."
             } catch {
+                Diag.note("run error \(error)")
                 if UIApplication.shared.applicationState != .active {
                     interruptedIds = ids
                     status = "Paused while PhotoDrop was in the background. It continues when you come back."
@@ -584,10 +596,12 @@ final class Uploader: ObservableObject {
     func attachContinued(_ task: BGContinuedProcessingTask) {
         guard running else { task.setTaskCompleted(success: true); return }
         continuedTask = task
+        Diag.note("continued task attached")
         backgroundNote = "Sending continues in other apps. Progress shows on the Lock Screen and Dynamic Island."
         let ids = continuedIds
         // The system's Stop button, or iOS needing the resources back: pause, and carry on when the app is opened.
         task.expirationHandler = {
+            Diag.note("continued task expired")
             Task { @MainActor in
                 Uploader.shared.interruptedIds = ids
                 Uploader.shared.task?.cancel()
@@ -670,6 +684,7 @@ final class Uploader: ObservableObject {
             try Task.checkCancellation() // Stop cancels the request; that isn't a lost connection
             throw StopRun(message: "Lost the laptop: \(error.localizedDescription)")
         } catch {
+            Diag.note("file failed \(resource.originalFilename): \(error)")
             failed[item.id] = error.localizedDescription
             lastError = "\(resource.originalFilename): \(error.localizedDescription)"
         }
@@ -698,6 +713,7 @@ final class Uploader: ObservableObject {
         let options = PHAssetResourceRequestOptions()
         options.isNetworkAccessAllowed = true
         let label = resource.originalFilename
+        Diag.note("read \(label) \(Self.size(of: resource) ?? -1)")
         options.progressHandler = { fraction in
             Task { @MainActor in Uploader.shared.status = "Downloading \(label) from iCloud: \(Int(fraction * 100))%" }
         }
@@ -707,6 +723,7 @@ final class Uploader: ObservableObject {
             }
         }
 
+        Diag.note("read done \(label)")
         let date = item.created ?? item.modified ?? Date()
         var components = URLComponents(url: base.appendingPathComponent("file"), resolvingAgainstBaseURL: false)!
         components.queryItems = [
@@ -727,6 +744,7 @@ final class Uploader: ObservableObject {
         let (data, response) = try await session.upload(for: request, fromFile: file, delegate: SentBytes { sent in
             Task { @MainActor in Uploader.shared.setSent(token, sent) }
         })
+        Diag.note("sent \(label)")
         try Self.check(response)
         let reply = try JSONDecoder().decode(PutReply.self, from: data)
         if reply.state == "holding" { laptopKeys.insert(reply.key) } else { desktopKeys.insert(reply.key) }

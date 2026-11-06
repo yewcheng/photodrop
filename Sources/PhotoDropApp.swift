@@ -6,6 +6,7 @@ import SwiftUI
 @main
 struct PhotoDropApp: App {
     init() {
+        Diag.start()
         BGTaskScheduler.shared.register(forTaskWithIdentifier: Uploader.backgroundTaskId, using: nil) { task in
             Task { @MainActor in await Uploader.shared.handleBackground(task as! BGProcessingTask) }
         }
