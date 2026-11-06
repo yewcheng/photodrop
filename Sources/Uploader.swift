@@ -768,7 +768,12 @@ final class Uploader: ObservableObject {
             let handle = try FileHandle(forReadingFrom: file)
             defer { try? handle.close() }
             var hasher = SHA256()
-            while let chunk = try handle.read(upToCount: 1 << 20), !chunk.isEmpty { hasher.update(data: chunk) }
+            // Each chunk is released as it goes; without the pool a 7.6 GB video piled up in memory until iOS killed the app.
+            while try autoreleasepool(invoking: {
+                guard let chunk = try handle.read(upToCount: 1 << 20), !chunk.isEmpty else { return false }
+                hasher.update(data: chunk)
+                return true
+            }) {}
             return hasher.finalize().map { String(format: "%02x", $0) }.joined()
         }.value
     }
