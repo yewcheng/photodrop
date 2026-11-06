@@ -318,6 +318,98 @@ final class Uploader: ObservableObject {
         }
     }
 
+    // MARK: Confirming older backups
+
+    @Published private(set) var confirming = false
+    @Published private(set) var confirmStatus: String?
+    private var confirmTask: Task<Void, Never>?
+
+    /// On the desktop by name and size only, from backups made before PhotoDrop: not yet safe to delete.
+    private var unconfirmed: [Media] {
+        media.filter { state(of: $0) == .desktop && !$0.keys.allSatisfy { $0.map(verifiedKeys.contains) == true } }
+    }
+    var unconfirmedCount: Int { unconfirmed.count }
+
+    func confirmArchive() {
+        guard !confirming, !running, let base = baseURL else { return }
+        confirming = true
+        let items = unconfirmed
+        confirmTask = Task {
+            var (confirmed, different, skipped) = (0, 0, 0)
+            var batch: [[String: String]] = []
+            var batchBytes: Int64 = 0
+            do {
+                for (index, item) in items.enumerated() {
+                    try Task.checkCancellation()
+                    confirmStatus = "Checking \(index + 1) of \(items.count) · \(confirmed) confirmed"
+                    guard let asset = PHAsset.fetchAssets(withLocalIdentifiers: [item.id], options: nil).firstObject else { continue }
+                    let resources = PHAssetResource.assetResources(for: asset).filter { Self.wanted.contains($0.type) }
+                    for resource in resources {
+                        guard let key = Self.key(Self.remoteName(resource, in: resources), Self.size(of: resource)),
+                              desktopKeys.contains(key), !verifiedKeys.contains(key) else { continue }
+                        // Items only in iCloud are skipped rather than downloaded: they take no room on the phone anyway.
+                        guard let sha = try? await Self.libraryChecksum(resource) else { skipped += 1; continue }
+                        batch.append(["key": key, "sha256": sha])
+                        batchBytes += Self.size(of: resource) ?? 0
+                        // Small batches: the laptop reads each one back from the desktop before answering.
+                        if batch.count >= 50 || batchBytes > 1_000_000_000 {
+                            let reply = try await postConfirm(batch, base: base)
+                            (confirmed, different) = (confirmed + reply.confirmed.count, different + reply.different.count)
+                            (batch, batchBytes) = ([], 0)
+                        }
+                    }
+                }
+                if !batch.isEmpty {
+                    let reply = try await postConfirm(batch, base: base)
+                    (confirmed, different) = (confirmed + reply.confirmed.count, different + reply.different.count)
+                }
+                confirmStatus = "Done: \(confirmed) confirmed"
+            } catch is CancellationError {
+                confirmStatus = "Stopped: \(confirmed) confirmed. Tap again to carry on."
+            } catch {
+                confirmStatus = "Stopped: \(error.localizedDescription). \(confirmed) confirmed so far."
+            }
+            if different > 0 { confirmStatus! += " · \(different) differ from the desktop copy and stay on the phone" }
+            if skipped > 0 { confirmStatus! += " · \(skipped) only in iCloud, skipped" }
+            confirming = false
+            await refresh()
+        }
+    }
+
+    func stopConfirming() { confirmTask?.cancel() }
+
+    private struct ConfirmReply: Decodable { let confirmed: [String]; let different: [String] }
+
+    private func postConfirm(_ batch: [[String: String]], base: URL) async throws -> ConfirmReply {
+        var request = URLRequest(url: base.appendingPathComponent("confirm-archive"))
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONEncoder().encode(batch)
+        let (data, response) = try await session.data(for: request)
+        try Self.check(response)
+        let reply = try JSONDecoder().decode(ConfirmReply.self, from: data)
+        verifiedKeys.formUnion(reply.confirmed)
+        updateCounts()
+        return reply
+    }
+
+    private final class Hasher: @unchecked Sendable { var sha = SHA256() }
+
+    /// Streams the original from the library through SHA-256, with no copy on disk: the phone may be nearly full.
+    private nonisolated static func libraryChecksum(_ resource: PHAssetResource) async throws -> String {
+        let hasher = Hasher()
+        let options = PHAssetResourceRequestOptions()
+        options.isNetworkAccessAllowed = false
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            PHAssetResourceManager.default().requestData(for: resource, options: options) { chunk in
+                hasher.sha.update(data: chunk)
+            } completionHandler: { error in
+                if let error { continuation.resume(throwing: error) } else { continuation.resume() }
+            }
+        }
+        return hasher.sha.finalize().map { String(format: "%02x", $0) }.joined()
+    }
+
     // MARK: Albums
 
     func loadAlbums() async {

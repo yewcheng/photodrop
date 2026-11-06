@@ -30,6 +30,7 @@ from pathlib import Path
 import segno
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
+from starlette.concurrency import run_in_threadpool
 
 ROOT = Path(os.environ.get("PHOTODROP_ROOT", Path.home() / "PhotoDrop"))
 # Where files wait until the final folder is reachable; chosen on the settings page.
@@ -69,7 +70,11 @@ def init_db() -> None:
                 key TEXT PRIMARY KEY, name TEXT, size INTEGER, sha256 TEXT, month TEXT, mtime REAL,
                 state TEXT, holding_path TEXT, dest_path TEXT, received_at REAL, verified_at REAL, error TEXT)"""
         )
-        conn.execute("CREATE TABLE IF NOT EXISTS archive (key TEXT PRIMARY KEY)")
+        conn.execute("CREATE TABLE IF NOT EXISTS archive (key TEXT PRIMARY KEY, path TEXT)")
+        try:
+            conn.execute("ALTER TABLE archive ADD COLUMN path TEXT")  # databases from before paths were kept
+        except sqlite3.OperationalError:
+            pass
         conn.execute("CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v REAL)")
         # Only token hashes are kept, so a copied database can't be used to pose as a phone.
         conn.execute("CREATE TABLE IF NOT EXISTS devices (token_hash TEXT PRIMARY KEY, name TEXT, paired_at REAL, last_seen REAL)")
@@ -134,14 +139,15 @@ def index_archive() -> None:
         for name in names:
             if not name.endswith(".part"):
                 try:
-                    keys.append((file_key(name, os.path.getsize(os.path.join(folder, name))),))
+                    path = os.path.join(folder, name)
+                    keys.append((file_key(name, os.path.getsize(path)), path))
                 except OSError:
                     pass
     # An empty walk from a share that just vanished must not wipe the index.
     if keys or os.path.isdir(DEST):
         with db() as conn:
             conn.execute("DELETE FROM archive")
-            conn.executemany("INSERT OR IGNORE INTO archive VALUES (?)", keys)
+            conn.executemany("INSERT OR IGNORE INTO archive (key, path) VALUES (?, ?)", keys)
             conn.execute("INSERT OR REPLACE INTO meta VALUES ('indexed_at', ?)", (time.time(),))
 
 
@@ -464,6 +470,50 @@ async def still_there(request: Request) -> list[str]:
         except OSError:
             pass
     return present
+
+
+@app.post("/confirm-archive")
+async def confirm_archive(request: Request) -> dict:
+    """Checksums older backups that matched only by name and size, against the phone's checksums.
+    A match is recorded as verified, which is what lets the phone offer it for deletion."""
+    check_user(request)
+    items = (await request.json())[:200]
+    return await run_in_threadpool(confirm_items, items)
+
+
+def confirm_items(items: list) -> dict:
+    confirmed, different = [], []
+    for item in items:
+        key, sha = str(item.get("key", "")), str(item.get("sha256", "")).lower()
+        with db() as conn:
+            known = conn.execute("SELECT state, sha256 FROM files WHERE key=?", (key,)).fetchone()
+            row = conn.execute("SELECT path FROM archive WHERE key=?", (key,)).fetchone()
+        if known:
+            if known["sha256"] != sha:
+                different.append(key)
+            elif known["state"] == "verified":
+                confirmed.append(key)
+            continue
+        if not row or not row["path"]:
+            continue
+        path = Path(row["path"])
+        try:
+            matches = sha256_file(path) == sha
+            stat = path.stat()
+        except OSError:
+            continue  # the desktop went away; the phone can ask again later
+        if not matches:
+            # shortcut: only the first file with this name and size is checked; a second copy elsewhere isn't tried.
+            different.append(key)
+            continue
+        with db() as conn:
+            conn.execute(
+                "INSERT OR IGNORE INTO files (key, name, size, sha256, month, mtime, state, dest_path, verified_at) "
+                "VALUES (?, ?, ?, ?, '', ?, 'verified', ?, ?)",
+                (key, path.name, stat.st_size, sha, stat.st_mtime, str(path), time.time()),
+            )
+        confirmed.append(key)
+    return {"confirmed": confirmed, "different": different}
 
 
 @app.get("/media")

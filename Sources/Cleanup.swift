@@ -164,6 +164,19 @@ struct CleanupTab: View {
                 } footer: {
                     Text("Only photos and videos already confirmed on the desktop are suggested, and you choose what goes. Comparing similar photos runs while the phone is charging.")
                 }
+                Section {
+                    if uploader.confirming {
+                        Button("Stop checking", role: .destructive) { uploader.stopConfirming() }
+                    } else {
+                        Button("Check \(uploader.unconfirmedCount) items against older backups") { uploader.confirmArchive() }
+                            .disabled(uploader.unconfirmedCount == 0 || uploader.running)
+                    }
+                    if let status = uploader.confirmStatus { Text(status).foregroundStyle(.secondary) }
+                } header: {
+                    Text("Older backups")
+                } footer: {
+                    Text("These were already on the desktop before PhotoDrop, matched only by name and size. Checking compares checksums without sending anything again; matches can then be deleted. Keep PhotoDrop open while it runs.")
+                }
                 if cleanup.scanned {
                     Section("Suggestions") {
                         link("Similar photos", "Best of each set is labelled", groups: cleanup.similar, grouped: true)

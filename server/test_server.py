@@ -156,6 +156,16 @@ with tempfile.TemporaryDirectory() as tmp:
         wait_for(lambda: (new_dest / "2026/202603_a/IMG_NEW.HEIC").exists(), "moved to new folder")
         assert call("POST", "/destination?path=relative/folder")[0] == 400
 
+        # An older backup matched by name and size becomes verified once its checksum matches the phone's.
+        old = {"key": "img_old.heic|5", "sha256": hashlib.sha256(b"12345").hexdigest()}
+        confirm = lambda items, user=USER: call("POST", "/confirm-archive", json.dumps(items).encode(), user=user)
+        assert confirm([old], user=None)[0] == 403
+        assert confirm([{**old, "sha256": "0" * 64}])[1] == {"confirmed": [], "different": ["img_old.heic|5"]}
+        assert call("GET", "/manifest")[1]["verified"].count("img_old.heic|5") == 0
+        assert confirm([old, {"key": "missing|1", "sha256": "0" * 64}])[1] == {"confirmed": ["img_old.heic|5"], "different": []}
+        assert "img_old.heic|5" in call("GET", "/manifest")[1]["verified"]
+        assert call("POST", "/still-there", json.dumps(["img_old.heic|5"]).encode())[1] == ["img_old.heic|5"]
+
         # Bad destination names never reach the disk.
         for bad in ("../evil.txt", "a/b.txt", "a\\b.txt", "C:evil.txt", "x.part", ".hidden", "con.txt", "trail."):
             assert put(bad, b"x")[0] == 400, bad
