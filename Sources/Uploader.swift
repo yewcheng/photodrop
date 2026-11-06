@@ -354,6 +354,7 @@ final class Uploader: ObservableObject {
                         guard let key = Self.key(Self.remoteName(resource, in: resources), Self.size(of: resource)),
                               desktopKeys.contains(key), !verifiedKeys.contains(key) else { continue }
                         // Items only in iCloud are skipped rather than downloaded: they take no room on the phone anyway.
+                        guard Self.isOnPhone(resource) else { skipped += 1; continue }
                         guard let sha = try? await Self.libraryChecksum(resource) else { skipped += 1; continue }
                         batch.append(["key": key, "sha256": sha])
                         batchBytes += Self.size(of: resource) ?? 0
@@ -405,6 +406,12 @@ final class Uploader: ObservableObject {
         var requestID: PHAssetResourceDataRequestID = 0
     }
 
+    /// Whether the original is stored on the phone rather than only in iCloud. Not public API, like fileSize: unknown counts as on the phone.
+    private nonisolated static func isOnPhone(_ resource: PHAssetResource) -> Bool {
+        guard resource.responds(to: Selector(("locallyAvailable"))) else { return true }
+        return (resource.value(forKey: "locallyAvailable") as? Bool) ?? true
+    }
+
     /// Streams the original from the library through SHA-256, with no copy on disk: the phone may be nearly full.
     private nonisolated static func libraryChecksum(_ resource: PHAssetResource) async throws -> String {
         let hasher = Hasher()
@@ -413,7 +420,7 @@ final class Uploader: ObservableObject {
         let manager = PHAssetResourceManager.default()
         // iOS sometimes never answers for an item it can't read; cancelling makes it report an error so the check moves on.
         let watchdog = Task {
-            try await Task.sleep(nanoseconds: 60_000_000_000)
+            try await Task.sleep(nanoseconds: 15_000_000_000)
             Diag.note("confirm: gave up waiting on \(resource.originalFilename)")
             manager.cancelDataRequest(hasher.requestID)
         }
