@@ -344,26 +344,41 @@ final class Uploader: ObservableObject {
             var batchBytes: Int64 = 0
             do {
                 Diag.note("confirm: start \(items.count) items")
-                for (index, item) in items.enumerated() {
+                // Four items at a time, so one slow or stuck photo doesn't hold up the rest.
+                for chunkStart in stride(from: 0, to: items.count, by: 4) {
                     try Task.checkCancellation()
-                    if index % 100 == 0 { Diag.note("confirm: item \(index), \(confirmed) confirmed") }
-                    confirmStatus = "Checking \(index + 1) of \(items.count) · \(confirmed) confirmed"
-                    guard let asset = PHAsset.fetchAssets(withLocalIdentifiers: [item.id], options: nil).firstObject else { continue }
-                    let resources = PHAssetResource.assetResources(for: asset).filter { Self.wanted.contains($0.type) }
-                    for resource in resources {
-                        guard let key = Self.key(Self.remoteName(resource, in: resources), Self.size(of: resource)),
-                              desktopKeys.contains(key), !verifiedKeys.contains(key) else { continue }
-                        // Items only in iCloud are skipped rather than downloaded: they take no room on the phone anyway.
-                        guard Self.isOnPhone(resource) else { skipped += 1; continue }
-                        guard let sha = try? await Self.libraryChecksum(resource) else { skipped += 1; continue }
-                        batch.append(["key": key, "sha256": sha])
-                        batchBytes += Self.size(of: resource) ?? 0
-                        // Small batches: the laptop reads each one back from the desktop before answering.
-                        if batch.count >= 50 || batchBytes > 1_000_000_000 {
-                            let reply = try await postConfirm(batch, base: base)
-                            (confirmed, different) = (confirmed + reply.confirmed.count, different + reply.different.count)
-                            (batch, batchBytes) = ([], 0)
+                    if chunkStart % 100 == 0 { Diag.note("confirm: item \(chunkStart), \(confirmed) confirmed") }
+                    confirmStatus = "Checking \(chunkStart + 1) of \(items.count) · \(confirmed) confirmed"
+                    var jobs: [(key: String, resource: PHAssetResource)] = []
+                    for item in items[chunkStart..<min(chunkStart + 4, items.count)] {
+                        guard let asset = PHAsset.fetchAssets(withLocalIdentifiers: [item.id], options: nil).firstObject else { continue }
+                        let resources = PHAssetResource.assetResources(for: asset).filter { Self.wanted.contains($0.type) }
+                        for resource in resources {
+                            guard let key = Self.key(Self.remoteName(resource, in: resources), Self.size(of: resource)),
+                                  desktopKeys.contains(key), !verifiedKeys.contains(key) else { continue }
+                            // Items only in iCloud are skipped rather than downloaded: they take no room on the phone anyway.
+                            guard Self.isOnPhone(resource) else { skipped += 1; continue }
+                            jobs.append((key, resource))
                         }
+                    }
+                    let sums = await withTaskGroup(of: (String, String?).self) { group in
+                        for job in jobs {
+                            group.addTask { (job.key, try? await Self.libraryChecksum(job.resource)) }
+                        }
+                        var sums: [String: String?] = [:]
+                        for await (key, sha) in group { sums[key] = sha }
+                        return sums
+                    }
+                    for job in jobs {
+                        guard let sha = sums[job.key] ?? nil else { skipped += 1; continue }
+                        batch.append(["key": job.key, "sha256": sha])
+                        batchBytes += Self.size(of: job.resource) ?? 0
+                    }
+                    // Small batches: the laptop reads each one back from the desktop before answering.
+                    if batch.count >= 50 || batchBytes > 1_000_000_000 {
+                        let reply = try await postConfirm(batch, base: base)
+                        (confirmed, different) = (confirmed + reply.confirmed.count, different + reply.different.count)
+                        (batch, batchBytes) = ([], 0)
                     }
                 }
                 if !batch.isEmpty {
