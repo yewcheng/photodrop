@@ -16,19 +16,19 @@
       "screenshotURLs": [],
       "versions": [
         {
-          "version": "0.1.39",
+          "version": "0.1.40",
           "date": "2026-11-06",
           "localizedDescription": "Automated build.",
-          "downloadURL": "https://github.com/yewcheng/photodrop/releases/download/v0.1.39/PhotoDrop-unsigned.ipa",
-          "size": 2457431,
+          "downloadURL": "https://github.com/yewcheng/photodrop/releases/download/v0.1.40/PhotoDrop-unsigned.ipa",
+          "size": 2456852,
           "minOSVersion": "16.0"
         }
       ],
-      "version": "0.1.39",
+      "version": "0.1.40",
       "versionDate": "2026-11-06",
       "versionDescription": "Automated build.",
-      "downloadURL": "https://github.com/yewcheng/photodrop/releases/download/v0.1.39/PhotoDrop-unsigned.ipa",
-      "size": 2457431
+      "downloadURL": "https://github.com/yewcheng/photodrop/releases/download/v0.1.40/PhotoDrop-unsigned.ipa",
+      "size": 2456852
     }
   ],
   "news": []
