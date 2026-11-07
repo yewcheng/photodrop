@@ -29,6 +29,7 @@ from pathlib import Path
 
 import segno
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from starlette.concurrency import run_in_threadpool
 
@@ -210,6 +211,7 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(lifespan=lifespan)
+app.add_middleware(GZipMiddleware, minimum_size=100_000)  # the manifest is ~5 MB; matters over a Tailscale relay
 
 
 def ensure_cert() -> str:
@@ -276,7 +278,7 @@ def wifi_name() -> str:
 def ago(t: float) -> str:
     seconds = time.time() - t
     if seconds < 60:
-        return "<b class=on>● Connected now</b>"
+        return "<b class=on>â— Connected now</b>"
     for size, unit in ((86400, "day"), (3600, "hour"), (60, "minute")):
         if seconds >= size:
             n = int(seconds // size)
@@ -295,7 +297,7 @@ def pair_page(request: Request) -> str:
         devices = conn.execute("SELECT token_hash, name, paired_at, last_seen FROM devices ORDER BY paired_at").fetchall()
         waiting = conn.execute("SELECT COUNT(*), COALESCE(SUM(size), 0) FROM files WHERE state='holding'").fetchone()
     phones = "".join(
-        f"<div class=phone><div><b>{html.escape(d['name'])}</b><span>{ago(d['last_seen'])} · paired "
+        f"<div class=phone><div><b>{html.escape(d['name'])}</b><span>{ago(d['last_seen'])} Â· paired "
         f"{time.strftime('%d %b %Y', time.localtime(d['paired_at']))}</span></div>"
         f"<div class=actions><button class=quiet onclick=\"rename('{d['token_hash']}', {html.escape(repr(d['name']))})\">Rename</button>"
         f"<form method=post action='/unpair?token_hash={d['token_hash']}'><button class=quiet>Unpair</button></form></div></div>"
@@ -334,11 +336,11 @@ button.quiet{{background:transparent;color:var(--muted);border:1px solid var(--l
 form{{margin:0}} .actions{{display:flex;gap:.5rem}}
 </style>
 <header><h1>PhotoDrop</h1>
-<div class=pill>Wi-Fi <b>{html.escape(wifi_name())}</b> · {lan_ip()}</div></header>
+<div class=pill>Wi-Fi <b>{html.escape(wifi_name())}</b> Â· {lan_ip()}</div></header>
 <main>
 <section class=card>
 <h2>Pair a phone</h2>
-<p class=muted>On the phone: PhotoDrop → Settings → Pair with laptop. It must be on the same Wi-Fi.</p>
+<p class=muted>On the phone: PhotoDrop â†’ Settings â†’ Pair with laptop. It must be on the same Wi-Fi.</p>
 <div class=qr>{segno.make(link, error="m").svg_inline(scale=6, border=2, omitsize=True)}</div>
 <div class=code>{pairing['code']}</div>
 <div class=addr>{address}</div>
@@ -349,10 +351,10 @@ form{{margin:0}} .actions{{display:flex;gap:.5rem}}
 <section class=card><h2>Folders</h2>
 <div class=folder><div><b>Final folder</b><span>Where photos end up</span><code>{html.escape(str(DEST))}</code>
 {"" if reachable else "<div class=warn>Not reachable right now. Files wait on this laptop until it is.</div>"}</div>
-<form method=post action="/choose?which=final"><button>Choose…</button></form></div>
-<div class=folder><div><b>Waiting folder</b><span>{waiting[0]} file{"" if waiting[0] == 1 else "s"} waiting · {waiting[1] / 1024**3:.1f} GB</span>
+<form method=post action="/choose?which=final"><button>Chooseâ€¦</button></form></div>
+<div class=folder><div><b>Waiting folder</b><span>{waiting[0]} file{"" if waiting[0] == 1 else "s"} waiting Â· {waiting[1] / 1024**3:.1f} GB</span>
 <code>{html.escape(str(HOLDING))}</code></div>
-<form method=post action="/choose?which=waiting"><button>Choose…</button></form></div>
+<form method=post action="/choose?which=waiting"><button>Chooseâ€¦</button></form></div>
 </section>
 <p><small>Updates every 10 seconds. This page only opens on this laptop.</small></p>
 </div>
